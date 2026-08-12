@@ -23,6 +23,7 @@ const demoPrecheck: PrecheckData = {
     radiusMeters: 50,
   },
   shift: { id: "shift_office", name: "Ca hành chính", startTime: "08:00", endTime: "17:00" },
+  device: { id: "demo-device", label: "Thiết bị mô phỏng", platform: "web", status: "TRUSTED", trusted: true, isBlocked: false },
   requirements: { trustedDevice: true, location: true, faceVerification: false, liveness: false, presenceProof: false },
 };
 
@@ -40,6 +41,9 @@ function firebaseErrorMessage(reason: unknown, fallback: string): string {
   const message = reason instanceof Error ? reason.message : "";
   if (code.includes("invalid-credential") || code.includes("wrong-password") || code.includes("user-not-found")) return "Mã nhân viên hoặc mật khẩu chưa đúng.";
   if (code.includes("too-many-requests")) return "Tài khoản đang tạm khóa do thử quá nhiều lần. Vui lòng thử lại sau.";
+  if (code.includes("resource-exhausted")) return "Bạn thao tác quá nhanh. Vui lòng đợi một phút rồi thử lại.";
+  if (code.includes("failed-precondition") && message) return message.replace(/^Firebase:\s*/i, "");
+  if (code.includes("permission-denied")) return "Bạn không có quyền thực hiện thao tác này.";
   if (code.includes("unauthenticated")) return "Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.";
   if (code.includes("internal") || message === "INTERNAL") return "Dịch vụ chấm công đang gặp lỗi tạm thời. Vui lòng thử lại.";
   if (message && !message.startsWith("Firebase:")) return message;
@@ -110,12 +114,37 @@ export async function getPrecheck(): Promise<PrecheckData> {
     await wait(600);
     return { ...demoPrecheck, serverTime: new Date().toISOString() };
   }
-  const callable = httpsCallable<void, PrecheckData>(getFirebaseServices().functions, "getPrecheck");
+  const deviceId = getOrCreateDeviceId();
+  const services = getFirebaseServices();
+  const register = httpsCallable(services.functions, "registerDevice");
+  const callable = httpsCallable<{ deviceId: string }, PrecheckData>(services.functions, "getPrecheck");
   try {
-    return (await callable()).data;
+    await register({
+      deviceId,
+      label: browserDeviceLabel(),
+      platform: browserPlatform(),
+    });
+    return (await callable({ deviceId })).data;
   } catch (reason) {
     throw new Error(firebaseErrorMessage(reason, "Không thể tải ca làm và điều kiện chấm công."));
   }
+}
+
+function browserPlatform(): string {
+  if (typeof navigator === "undefined") return "web";
+  const value = navigator.userAgent.toLowerCase();
+  if (/iphone|ipad|ipod/.test(value)) return "ios-web";
+  if (/android/.test(value)) return "android-web";
+  if (/windows/.test(value)) return "windows-web";
+  if (/macintosh|mac os/.test(value)) return "macos-web";
+  return "web";
+}
+
+function browserDeviceLabel(): string {
+  if (typeof navigator === "undefined") return "Trình duyệt web";
+  const platform = browserPlatform();
+  const browser = /edg\//i.test(navigator.userAgent) ? "Edge" : /chrome\//i.test(navigator.userAgent) ? "Chrome" : /safari\//i.test(navigator.userAgent) ? "Safari" : "Trình duyệt";
+  return `${browser} · ${platform}`;
 }
 
 export function getOrCreateDeviceId(): string {

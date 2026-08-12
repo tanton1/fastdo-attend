@@ -18,6 +18,14 @@ export interface PrecheckData {
     radiusMeters: number;
   };
   shift: { id: string; name: string; startTime: string; endTime: string };
+  device: {
+    id: string;
+    label: string;
+    platform: string;
+    status: "PENDING" | "TRUSTED" | "BLOCKED";
+    trusted: boolean;
+    isBlocked: boolean;
+  };
   requirements: {
     trustedDevice: boolean;
     location: boolean;

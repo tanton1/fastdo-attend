@@ -2,14 +2,14 @@
 
 Mục tiêu của giai đoạn 03 là chuyển hệ thống từ MVP có backend thật thành bản pilot có thể dùng tại một doanh nghiệp, với bằng chứng chấm công đủ tin cậy và quy trình quản trị rõ ràng.
 
-## Sprint 1 — Bảo mật và thiết bị (ưu tiên P0)
+## Sprint 1 — Bảo mật và thiết bị (P0 · backend đã triển khai)
 
 - Bật Firebase App Check cho Web và Functions.
 - Thêm rate limiting, audit log và cảnh báo thao tác bất thường.
 - Xây quy trình đăng ký/duyệt/chặn thiết bị; không hiển thị “tin cậy” trước khi backend xác nhận.
 - Tách tài khoản demo khỏi dữ liệu pilot và xoay thông tin đăng nhập.
 
-**Hoàn thành khi:** request giả mạo không có App Check bị từ chối; quản trị viên có thể duyệt thiết bị; toàn bộ quyết định thiết bị được lưu audit.
+**Đã đạt:** request không có App Check bị từ chối; API quản trị có thể duyệt/chặn thiết bị; toàn bộ quyết định thiết bị được lưu audit. Giao diện quản trị trực quan được thực hiện trong Sprint 4.
 
 ## Sprint 2 — Hiện diện tại cơ sở (ưu tiên P0)
 

@@ -83,6 +83,11 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    match /auditLogs/{auditId} {
+      allow read: if isManager() && belongsToCompany(resource.data);
+      allow write: if false;
+    }
+
     match /attendanceRequests/{requestId} {
       allow read: if ownsRecord(resource.data) || (isManager() && belongsToCompany(resource.data));
       allow create: if isActiveEmployee()

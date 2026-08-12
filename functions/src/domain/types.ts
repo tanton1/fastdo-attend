@@ -44,3 +44,19 @@ export interface ShiftAssignmentDocument {
   startDate: Timestamp;
   endDate: Timestamp;
 }
+
+export type DeviceStatus = "PENDING" | "TRUSTED" | "BLOCKED";
+
+export interface DeviceDocument {
+  companyId: string;
+  userId: string;
+  label: string;
+  platform: string;
+  status: DeviceStatus;
+  isBlocked: boolean;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+  lastSeenAt: Timestamp;
+  reviewedAt: Timestamp | null;
+  reviewedBy: string | null;
+}

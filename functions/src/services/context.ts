@@ -63,3 +63,11 @@ export async function loadAttendanceContext(userId: string): Promise<AttendanceC
     shift: shiftSnapshot.data() as ShiftDocument,
   };
 }
+
+export async function loadManagerContext(userId: string): Promise<AttendanceContext> {
+  const context = await loadAttendanceContext(userId);
+  if (!["SUPER_ADMIN", "COMPANY_ADMIN", "HR", "MANAGER"].includes(context.employee.role)) {
+    throw new HttpsError("permission-denied", "Bạn không có quyền quản lý thiết bị.");
+  }
+  return context;
+}

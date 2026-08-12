@@ -1,4 +1,5 @@
 import { getApp, getApps, initializeApp } from "firebase/app";
+import { ReCaptchaEnterpriseProvider, initializeAppCheck } from "firebase/app-check";
 import { connectAuthEmulator, getAuth } from "firebase/auth";
 import { connectFirestoreEmulator, getFirestore } from "firebase/firestore";
 import { connectFunctionsEmulator, getFunctions } from "firebase/functions";
@@ -13,14 +14,26 @@ const firebaseConfig = {
 };
 
 let emulatorsConnected = false;
+let appCheckInitialized = false;
 
 export function getFirebaseServices() {
   const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
+  const appCheckSiteKey = process.env.NEXT_PUBLIC_FIREBASE_APP_CHECK_SITE_KEY;
+  const usesEmulators = process.env.NEXT_PUBLIC_FIREBASE_USE_EMULATORS === "true";
+  const isDemo = process.env.NEXT_PUBLIC_FIREBASE_DEMO_MODE !== "false";
+  if (!appCheckInitialized && !usesEmulators && !isDemo) {
+    if (!appCheckSiteKey) throw new Error("App Check chưa được cấu hình cho môi trường production.");
+    initializeAppCheck(app, {
+      provider: new ReCaptchaEnterpriseProvider(appCheckSiteKey),
+      isTokenAutoRefreshEnabled: true,
+    });
+    appCheckInitialized = true;
+  }
   const auth = getAuth(app);
   const db = getFirestore(app);
   const functions = getFunctions(app, process.env.NEXT_PUBLIC_FIREBASE_FUNCTIONS_REGION ?? "asia-southeast1");
 
-  if (process.env.NEXT_PUBLIC_FIREBASE_USE_EMULATORS === "true" && !emulatorsConnected) {
+  if (usesEmulators && !emulatorsConnected) {
     connectAuthEmulator(auth, "http://127.0.0.1:9099", { disableWarnings: true });
     connectFirestoreEmulator(db, "127.0.0.1", 8080);
     connectFunctionsEmulator(functions, "127.0.0.1", 5001);

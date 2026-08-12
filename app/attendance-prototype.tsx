@@ -209,7 +209,7 @@ function HomeScreen({ time, date, user, precheck, onCheckIn, onLogout }: { time:
         <div className="readiness-card">
           <div><span className="mini-icon">◉</span><p>Camera<strong>Sẽ kiểm tra</strong></p></div>
           <div><span className="mini-icon">⌖</span><p>Vị trí<strong>Sẽ kiểm tra</strong></p></div>
-          <div><span className="mini-icon">▣</span><p>Thiết bị<strong>{firebaseDemoMode() ? "Mô phỏng" : "Sẽ đánh giá"}</strong></p></div>
+          <div><span className="mini-icon">▣</span><p>Thiết bị<strong>{firebaseDemoMode() ? "Mô phỏng" : precheck?.device.trusted ? "Đã duyệt" : precheck?.device.isBlocked ? "Đã chặn" : precheck ? "Chờ duyệt" : "Sẽ đánh giá"}</strong></p></div>
           <div><span className="mini-icon mini-icon--warn">⌘</span><p>Điểm cơ sở<strong className="warn">Chưa xác minh</strong></p></div>
         </div>
       </main>
@@ -228,8 +228,8 @@ function HomeScreen({ time, date, user, precheck, onCheckIn, onLogout }: { time:
 function PrecheckScreen({ onBack, onContinue }: { onBack: () => void; onContinue: (precheck: PrecheckData, location: DeviceLocation) => void }) {
   const demoMode = firebaseDemoMode();
   const [states, setStates] = useState<Record<string, CheckState>>({
-    device: "success",
-    location: "checking",
+    device: "checking",
+    location: "waiting",
     time: "waiting",
     network: "waiting",
   });
@@ -244,17 +244,22 @@ function PrecheckScreen({ onBack, onContinue }: { onBack: () => void; onContinue
       setError("");
       setPrecheck(null);
       setLocation(null);
-      setStates({ device: "success", location: "checking", time: "waiting", network: "checking" });
+      setStates({ device: "checking", location: "waiting", time: "waiting", network: "checking" });
       let data: PrecheckData;
       try {
         data = await getPrecheck();
         if (!active) return;
         setPrecheck(data);
+        if (!data.device.trusted) {
+          setStates({ device: "warning", location: "waiting", time: "success", network: "success" });
+          setError(data.device.isBlocked ? "Thiết bị này đã bị quản trị viên chặn." : "Thiết bị đã được đăng ký và đang chờ quản trị viên phê duyệt.");
+          return;
+        }
         setStates({ device: "success", location: "checking", time: "success", network: "checking" });
       } catch (reason) {
         if (!active) return;
         setError(reason instanceof Error ? reason.message : "Không thể tải điều kiện chấm công.");
-        setStates({ device: "success", location: "waiting", time: "waiting", network: "warning" });
+        setStates({ device: "warning", location: "waiting", time: "waiting", network: "warning" });
         return;
       }
 
@@ -301,7 +306,7 @@ function PrecheckScreen({ onBack, onContinue }: { onBack: () => void; onContinue
                 <span className="check-row__icon">{check.icon}</span>
                 <div>
                   <h2>{check.title}</h2>
-                  <p>{state === "checking" ? "Đang xác minh…" : state === "waiting" ? "Đang chờ kiểm tra" : check.id === "location" && location ? `Độ chính xác GPS ±${Math.round(location.accuracy)} m` : check.id === "time" && precheck ? `Ca bắt đầu lúc ${precheck.shift.startTime}` : check.id === "network" && !demoMode ? "Đã kết nối Firebase" : check.detail}</p>
+                  <p>{state === "checking" ? "Đang xác minh…" : state === "waiting" ? "Đang chờ kiểm tra" : check.id === "device" && precheck ? `${precheck.device.label} · ${precheck.device.trusted ? "Đã duyệt" : precheck.device.isBlocked ? "Đã chặn" : "Chờ duyệt"}` : check.id === "location" && location ? `Độ chính xác GPS ±${Math.round(location.accuracy)} m` : check.id === "time" && precheck ? `Ca bắt đầu lúc ${precheck.shift.startTime}` : check.id === "network" && !demoMode ? "Đã kết nối Firebase" : check.detail}</p>
                 </div>
                 <StatusDot state={state} />
               </article>

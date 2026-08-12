@@ -4,10 +4,18 @@ import { HttpsError, onCall } from "firebase-functions/v2/https";
 import { setGlobalOptions } from "firebase-functions/v2/options";
 import { distanceInMeters } from "./domain/geo";
 import { calculateAttendanceRisk } from "./domain/risk";
-import { loadAttendanceContext, requireUserId } from "./services/context";
+import { deviceCanCheckIn, sanitizePlatform } from "./domain/device";
+import type { DeviceDocument, DeviceStatus } from "./domain/types";
+import { buildAuditLogDocument, writeAuditLog } from "./services/audit";
+import { loadAttendanceContext, loadManagerContext, requireUserId } from "./services/context";
+import { publicDeviceStatus, readOwnedDevice, registerOrTouchDevice, requireDeviceId } from "./services/devices";
+import type { DeviceRegistrationInput } from "./services/devices";
+import { enforceRateLimit } from "./services/rate-limit";
 
 initializeApp();
 setGlobalOptions({ region: "asia-southeast1", maxInstances: 10, memory: "256MiB", timeoutSeconds: 30 });
+
+const callableOptions = { enforceAppCheck: process.env.FUNCTIONS_EMULATOR !== "true" } as const;
 
 interface LocationInput {
   latitude: number;
@@ -25,6 +33,16 @@ interface AttendanceInput {
   offline?: boolean;
 }
 
+interface PrecheckInput {
+  deviceId: string;
+}
+
+interface DeviceReviewInput {
+  deviceId: string;
+  decision: Extract<DeviceStatus, "TRUSTED" | "BLOCKED">;
+  reason?: string;
+}
+
 function requireAttendanceInput(input: AttendanceInput): void {
   if (!input?.idempotencyKey || !input?.deviceId || !input?.location) {
     throw new HttpsError("invalid-argument", "Thiếu bằng chứng chấm công bắt buộc.");
@@ -37,16 +55,94 @@ function requireAttendanceInput(input: AttendanceInput): void {
   }
 }
 
-async function deviceIsTrusted(userId: string, companyId: string, deviceId: string): Promise<boolean> {
-  const snapshot = await getFirestore().doc(`devices/${deviceId}`).get();
-  if (!snapshot.exists) return false;
-  const data = snapshot.data();
-  return data?.userId === userId && data?.companyId === companyId && data?.status === "TRUSTED" && data?.isBlocked !== true;
-}
-
-export const getPrecheck = onCall(async (request) => {
+export const registerDevice = onCall<DeviceRegistrationInput>(callableOptions, async (request) => {
   const userId = requireUserId(request);
   const context = await loadAttendanceContext(userId);
+  await enforceRateLimit(userId, "registerDevice", 5);
+  const registration = await registerOrTouchDevice(context, request.data, buildAuditLogDocument(request, context, {
+    action: "DEVICE_REGISTERED",
+    targetType: "DEVICE",
+    targetId: request.data.deviceId,
+    metadata: { status: "PENDING", platform: sanitizePlatform(request.data.platform) },
+  }));
+
+  return publicDeviceStatus(request.data.deviceId, registration.device);
+});
+
+export const getDeviceStatus = onCall<{ deviceId: string }>(callableOptions, async (request) => {
+  const userId = requireUserId(request);
+  const context = await loadAttendanceContext(userId);
+  await enforceRateLimit(userId, "getDeviceStatus", 30);
+  const deviceId = requireDeviceId(request.data?.deviceId);
+  const device = await readOwnedDevice(context, deviceId);
+  if (!device) throw new HttpsError("not-found", "Thiết bị chưa được đăng ký.");
+  return publicDeviceStatus(deviceId, device);
+});
+
+export const listDevices = onCall(callableOptions, async (request) => {
+  const userId = requireUserId(request);
+  const context = await loadManagerContext(userId);
+  await enforceRateLimit(userId, "listDevices", 30);
+  const snapshots = await getFirestore()
+    .collection("devices")
+    .where("companyId", "==", context.employee.companyId)
+    .orderBy("createdAt", "desc")
+    .limit(100)
+    .get();
+
+  return {
+    devices: snapshots.docs.map((snapshot) => ({
+      ...publicDeviceStatus(snapshot.id, snapshot.data() as DeviceDocument),
+      userId: snapshot.data().userId,
+      createdAt: snapshot.data().createdAt?.toDate?.().toISOString() ?? null,
+      lastSeenAt: snapshot.data().lastSeenAt?.toDate?.().toISOString() ?? null,
+    })),
+  };
+});
+
+export const reviewDevice = onCall<DeviceReviewInput>(callableOptions, async (request) => {
+  const userId = requireUserId(request);
+  const context = await loadManagerContext(userId);
+  await enforceRateLimit(userId, "reviewDevice", 20);
+  const deviceId = requireDeviceId(request.data?.deviceId);
+  if (!["TRUSTED", "BLOCKED"].includes(request.data?.decision)) {
+    throw new HttpsError("invalid-argument", "Quyết định duyệt thiết bị không hợp lệ.");
+  }
+
+  const reference = getFirestore().doc(`devices/${deviceId}`);
+  const snapshot = await reference.get();
+  if (!snapshot.exists || snapshot.data()?.companyId !== context.employee.companyId) {
+    throw new HttpsError("not-found", "Không tìm thấy thiết bị trong doanh nghiệp.");
+  }
+
+  const now = Timestamp.now();
+  const decision = request.data.decision;
+  const batch = getFirestore().batch();
+  batch.update(reference, {
+    status: decision,
+    isBlocked: decision === "BLOCKED",
+    reviewedAt: now,
+    reviewedBy: userId,
+    reviewReason: typeof request.data.reason === "string" ? request.data.reason.trim().slice(0, 200) : null,
+    updatedAt: now,
+  });
+  batch.create(getFirestore().collection("auditLogs").doc(), buildAuditLogDocument(request, context, {
+    action: decision === "TRUSTED" ? "DEVICE_APPROVED" : "DEVICE_BLOCKED",
+    targetType: "DEVICE",
+    targetId: deviceId,
+    metadata: { previousStatus: String(snapshot.data()?.status ?? "UNKNOWN"), decision },
+  }));
+  await batch.commit();
+  return { deviceId, status: decision, trusted: decision === "TRUSTED" };
+});
+
+export const getPrecheck = onCall<PrecheckInput>(callableOptions, async (request) => {
+  const userId = requireUserId(request);
+  const context = await loadAttendanceContext(userId);
+  await enforceRateLimit(userId, "getPrecheck", 20);
+  const deviceId = requireDeviceId(request.data?.deviceId);
+  const device = await readOwnedDevice(context, deviceId);
+  if (!device) throw new HttpsError("failed-precondition", "Thiết bị chưa được đăng ký.");
 
   return {
     serverTime: new Date().toISOString(),
@@ -60,6 +156,7 @@ export const getPrecheck = onCall(async (request) => {
       radiusMeters: context.branch.geofenceRadiusMeters,
     },
     shift: { id: context.shiftId, name: context.shift.name, startTime: context.shift.startTime, endTime: context.shift.endTime },
+    device: publicDeviceStatus(deviceId, device),
     requirements: {
       trustedDevice: true,
       location: true,
@@ -70,21 +167,33 @@ export const getPrecheck = onCall(async (request) => {
   };
 });
 
-export const checkIn = onCall<AttendanceInput>(async (request) => {
+export const checkIn = onCall<AttendanceInput>(callableOptions, async (request) => {
   const userId = requireUserId(request);
   requireAttendanceInput(request.data);
 
   const context = await loadAttendanceContext(userId);
+  await enforceRateLimit(userId, "checkIn", 5);
+  const device = await readOwnedDevice(context, request.data.deviceId);
+  const trustedDevice = Boolean(device && deviceCanCheckIn(device.status, device.isBlocked));
+  if (!trustedDevice) {
+    await writeAuditLog(request, context, {
+      action: "CHECK_IN_BLOCKED_UNTRUSTED_DEVICE",
+      targetType: "DEVICE",
+      targetId: request.data.deviceId,
+      metadata: { status: device?.status ?? "UNREGISTERED" },
+    });
+    throw new HttpsError("failed-precondition", "Thiết bị chưa được quản trị viên phê duyệt.");
+  }
   const db = getFirestore();
   const idempotencyRef = db.doc(`idempotencyKeys/${userId}_${request.data.idempotencyKey}`);
   const eventRef = db.collection("attendanceEvents").doc();
   const sessionRef = db.collection("workSessions").doc();
+  const auditRef = db.collection("auditLogs").doc();
   const now = Timestamp.now();
   const clientDate = new Date(request.data.clientTimestamp);
   const clockDifferenceSeconds = Number.isNaN(clientDate.getTime()) ? 0 : (now.toMillis() - clientDate.getTime()) / 1000;
   const distance = distanceInMeters(request.data.location, context.branch);
   const insideGeofence = distance <= context.branch.geofenceRadiusMeters + Math.min(request.data.location.accuracy, 30);
-  const trustedDevice = await deviceIsTrusted(userId, context.employee.companyId, request.data.deviceId);
   // Face/liveness/presence become required once their providers are connected.
   // Until then, missing optional signals must not create a false fraud score.
   const activePolicy = { faceVerification: false, liveness: false, presenceProof: false };
@@ -164,20 +273,30 @@ export const checkIn = onCall<AttendanceInput>(async (request) => {
     });
 
     transaction.create(idempotencyRef, { userId, operation: "CHECK_IN", createdAt: now, response });
+    transaction.create(auditRef, buildAuditLogDocument(request, context, {
+      action: "ATTENDANCE_CHECK_IN_DECIDED",
+      targetType: "ATTENDANCE_EVENT",
+      targetId: eventRef.id,
+      metadata: { decision: risk.decision, status: attendanceStatus },
+    }));
     return response;
   });
 
   return result;
 });
 
-export const checkOut = onCall<AttendanceInput>(async (request) => {
+export const checkOut = onCall<AttendanceInput>(callableOptions, async (request) => {
   const userId = requireUserId(request);
   requireAttendanceInput(request.data);
 
   const context = await loadAttendanceContext(userId);
+  await enforceRateLimit(userId, "checkOut", 5);
+  const device = await readOwnedDevice(context, request.data.deviceId);
+  if (!device) throw new HttpsError("failed-precondition", "Thiết bị chưa được đăng ký.");
   const db = getFirestore();
   const idempotencyRef = db.doc(`idempotencyKeys/${userId}_${request.data.idempotencyKey}`);
   const eventRef = db.collection("attendanceEvents").doc();
+  const auditRef = db.collection("auditLogs").doc();
   const now = Timestamp.now();
   const distance = distanceInMeters(request.data.location, context.branch);
   const insideGeofence = distance <= context.branch.geofenceRadiusMeters + Math.min(request.data.location.accuracy, 30);
@@ -219,13 +338,19 @@ export const checkOut = onCall<AttendanceInput>(async (request) => {
     });
     transaction.update(sessionRef, { status: "ENDED", endedAt: now, checkOutEventId: eventRef.id, lastHeartbeatAt: now });
     transaction.create(idempotencyRef, { userId, operation: "CHECK_OUT", createdAt: now, response });
+    transaction.create(auditRef, buildAuditLogDocument(request, context, {
+      action: "ATTENDANCE_CHECK_OUT_RECORDED",
+      targetType: "ATTENDANCE_EVENT",
+      targetId: eventRef.id,
+      metadata: { status: response.status },
+    }));
     return response;
   });
 
   return result;
 });
 
-export const sendLocationHeartbeat = onCall<{ sessionId: string; location: LocationInput }>(async (request) => {
+export const sendLocationHeartbeat = onCall<{ sessionId: string; location: LocationInput }>(callableOptions, async (request) => {
   const userId = requireUserId(request);
   if (!request.data?.sessionId || !request.data?.location) throw new HttpsError("invalid-argument", "Thiếu dữ liệu heartbeat.");
 
@@ -237,6 +362,7 @@ export const sendLocationHeartbeat = onCall<{ sessionId: string; location: Locat
   }
 
   const context = await loadAttendanceContext(userId);
+  await enforceRateLimit(userId, "sendLocationHeartbeat", 30);
   const distance = distanceInMeters(request.data.location, context.branch);
   const insideGeofence = distance <= context.branch.exitRadiusMeters + Math.min(request.data.location.accuracy, 30);
   const now = Timestamp.now();
