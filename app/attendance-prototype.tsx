@@ -2,7 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { firebaseDemoMode } from "./lib/firebase-client";
-import { getPrecheck, loginEmployee, logoutEmployee, readCurrentLocation, sendLocationHeartbeat, submitCheckIn, submitCheckOut } from "./lib/attendance-api";
+import { getPrecheck, loginEmployee, logoutEmployee, readCurrentLocation, requestPasswordReset, restoreAuthenticatedUser, sendLocationHeartbeat, submitCheckIn, submitCheckOut } from "./lib/attendance-api";
 import type { AttendanceUser, CheckInResult, DeviceLocation, LocationHeartbeatResult, PrecheckData } from "./lib/attendance-types";
 
 type Screen = "login" | "home" | "precheck" | "face" | "success" | "session";
@@ -13,13 +13,13 @@ const checks = [
     id: "device",
     icon: "▣",
     title: "Thiết bị",
-    detail: "iPhone 14 Pro · Thiết bị tin cậy",
+    detail: "Mã thiết bị đã sẵn sàng để đánh giá",
   },
   {
     id: "location",
     icon: "⌖",
     title: "Vị trí",
-    detail: "Cách Aura Thanh Khê 18 m",
+    detail: "Đã nhận tọa độ GPS chính xác",
   },
   {
     id: "time",
@@ -53,18 +53,22 @@ function StatusDot({ state }: { state: CheckState }) {
   }
 
   return (
-    <span className={`status-dot status-dot--${state}`} aria-label={state === "success" ? "Đạt" : "Chờ kiểm tra"}>
-      {state === "success" ? "✓" : "•"}
+    <span className={`status-dot status-dot--${state}`} aria-label={state === "success" ? "Đạt" : state === "warning" ? "Cần xử lý" : "Chờ kiểm tra"}>
+      {state === "success" ? "✓" : state === "warning" ? "!" : "•"}
     </span>
   );
 }
 
-function LoginScreen({ onLogin }: { onLogin: (employeeId: string, password: string) => Promise<void> }) {
-  const [employeeId, setEmployeeId] = useState("FD0238");
-  const [password, setPassword] = useState("fastdo2026");
+function LoginScreen({ onLogin }: { onLogin: (employeeId: string, password: string, remember: boolean) => Promise<void> }) {
+  const demoMode = firebaseDemoMode();
+  const [employeeId, setEmployeeId] = useState(demoMode ? "FD0238" : "");
+  const [password, setPassword] = useState(demoMode ? "fastdo2026" : "");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [remember, setRemember] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [resetting, setResetting] = useState(false);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -75,11 +79,24 @@ function LoginScreen({ onLogin }: { onLogin: (employeeId: string, password: stri
     setError("");
     setSubmitting(true);
     try {
-      await onLogin(employeeId, password);
+      await onLogin(employeeId, password, remember);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Không thể đăng nhập. Vui lòng thử lại.");
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function resetPassword() {
+    setError("");
+    setNotice("");
+    setResetting(true);
+    try {
+      setNotice(await requestPasswordReset(employeeId));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Chưa thể gửi email đặt lại mật khẩu.");
+    } finally {
+      setResetting(false);
     }
   }
 
@@ -122,33 +139,34 @@ function LoginScreen({ onLogin }: { onLogin: (employeeId: string, password: stri
         </label>
 
         <div className="form-options">
-          <label className="remember"><input type="checkbox" defaultChecked /> <span>Ghi nhớ tài khoản</span></label>
-          <button type="button" className="text-button">Quên mật khẩu?</button>
+          <label className="remember"><input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)} /> <span>Ghi nhớ tài khoản</span></label>
+          <button type="button" className="text-button" onClick={() => void resetPassword()} disabled={resetting}>{resetting ? "Đang gửi…" : "Quên mật khẩu?"}</button>
         </div>
 
         {error && <p className="form-error" role="alert">{error}</p>}
+        {notice && <p className="form-notice" role="status">{notice}</p>}
         <button className="primary-button" type="submit" disabled={submitting}>{submitting ? "Đang xác thực…" : "Đăng nhập"}</button>
       </form>
 
       <div className="divider"><span>hoặc đăng nhập bằng</span></div>
-      <button className="passkey-button" type="button" onClick={() => onLogin(employeeId, password)}>
+      <button className="passkey-button" type="button" onClick={demoMode ? () => onLogin(employeeId, password, remember) : undefined} disabled={!demoMode} title={demoMode ? undefined : "WebAuthn/Passkey sẽ được tích hợp ở giai đoạn tiếp theo"}>
         <span className="scan-icon">⌾</span>
-        Passkey / Face ID
+        {demoMode ? "Passkey / Face ID" : "Passkey / Face ID · Sắp có"}
       </button>
 
-      <p className="login-help">Chưa có tài khoản? <button className="text-button">Liên hệ quản trị</button></p>
+      <p className="login-help">Chưa có tài khoản? Liên hệ quản trị viên để được cấp quyền.</p>
     </section>
   );
 }
 
-function HomeScreen({ time, user, precheck, onCheckIn, onLogout }: { time: string; user: AttendanceUser; precheck: PrecheckData | null; onCheckIn: () => void; onLogout: () => void }) {
+function HomeScreen({ time, date, user, precheck, onCheckIn, onLogout }: { time: string; date: string; user: AttendanceUser; precheck: PrecheckData | null; onCheckIn: () => void; onLogout: () => void }) {
   return (
     <section className="screen home-screen" aria-labelledby="home-title">
       <header className="mobile-header">
         <div>
           <p>Chào buổi sáng,</p>
           <h1 id="home-title">{user.fullName}</h1>
-          <span>Thứ Tư, 12/08/2026</span>
+          <span>{date}</span>
         </div>
         <div className="header-actions">
           <button className="icon-button" aria-label="Thông báo"><span className="notification-dot" />♧</button>
@@ -163,7 +181,7 @@ function HomeScreen({ time, user, precheck, onCheckIn, onLogout }: { time: strin
             <h2>{precheck?.shift.name ?? "Ca hành chính"}</h2>
             <strong>{precheck?.shift.startTime ?? "08:00"} – {precheck?.shift.endTime ?? "17:00"}</strong>
           </div>
-          <span className="countdown">Còn 8 phút</span>
+          <span className="countdown">Theo lịch ca</span>
           <div className="shift-location">
             <span>⌖</span>
             <p>{precheck?.branch.name ?? "Aura Thanh Khê"}<br /><small>{precheck?.branch.address ?? "276 Thái Thị Bôi, Đà Nẵng"}</small></p>
@@ -189,9 +207,9 @@ function HomeScreen({ time, user, precheck, onCheckIn, onLogout }: { time: strin
         <button className="primary-button checkin-button" onClick={onCheckIn}>CHẤM CÔNG VÀO <span>→</span></button>
 
         <div className="readiness-card">
-          <div><span className="mini-icon">◉</span><p>Camera<strong>Sẵn sàng</strong></p></div>
-          <div><span className="mini-icon">⌖</span><p>Vị trí<strong>Đã bật</strong></p></div>
-          <div><span className="mini-icon">▣</span><p>Thiết bị<strong>Tin cậy</strong></p></div>
+          <div><span className="mini-icon">◉</span><p>Camera<strong>Sẽ kiểm tra</strong></p></div>
+          <div><span className="mini-icon">⌖</span><p>Vị trí<strong>Sẽ kiểm tra</strong></p></div>
+          <div><span className="mini-icon">▣</span><p>Thiết bị<strong>{firebaseDemoMode() ? "Mô phỏng" : "Sẽ đánh giá"}</strong></p></div>
           <div><span className="mini-icon mini-icon--warn">⌘</span><p>Điểm cơ sở<strong className="warn">Chưa xác minh</strong></p></div>
         </div>
       </main>
@@ -208,6 +226,7 @@ function HomeScreen({ time, user, precheck, onCheckIn, onLogout }: { time: strin
 }
 
 function PrecheckScreen({ onBack, onContinue }: { onBack: () => void; onContinue: (precheck: PrecheckData, location: DeviceLocation) => void }) {
+  const demoMode = firebaseDemoMode();
   const [states, setStates] = useState<Record<string, CheckState>>({
     device: "success",
     location: "checking",
@@ -217,15 +236,29 @@ function PrecheckScreen({ onBack, onContinue }: { onBack: () => void; onContinue
   const [precheck, setPrecheck] = useState<PrecheckData | null>(null);
   const [location, setLocation] = useState<DeviceLocation | null>(null);
   const [error, setError] = useState("");
+  const [retryKey, setRetryKey] = useState(0);
 
   useEffect(() => {
     let active = true;
     async function runPrecheck() {
+      setError("");
+      setPrecheck(null);
+      setLocation(null);
+      setStates({ device: "success", location: "checking", time: "waiting", network: "checking" });
+      let data: PrecheckData;
       try {
-        const data = await getPrecheck();
+        data = await getPrecheck();
         if (!active) return;
         setPrecheck(data);
         setStates({ device: "success", location: "checking", time: "success", network: "checking" });
+      } catch (reason) {
+        if (!active) return;
+        setError(reason instanceof Error ? reason.message : "Không thể tải điều kiện chấm công.");
+        setStates({ device: "success", location: "waiting", time: "waiting", network: "warning" });
+        return;
+      }
+
+      try {
         const currentLocation = await readCurrentLocation(firebaseDemoMode());
         if (!active) return;
         setLocation(currentLocation);
@@ -233,12 +266,12 @@ function PrecheckScreen({ onBack, onContinue }: { onBack: () => void; onContinue
       } catch (reason) {
         if (!active) return;
         setError(reason instanceof Error ? reason.message : "Không thể kiểm tra điều kiện chấm công.");
-        setStates((current) => ({ ...current, location: "warning", network: "warning" }));
+        setStates({ device: "success", location: "warning", time: "success", network: "success" });
       }
     }
     void runPrecheck();
     return () => { active = false; };
-  }, []);
+  }, [retryKey]);
 
   const complete = Object.values(states).every((state) => state === "success") && Boolean(precheck && location);
 
@@ -268,7 +301,7 @@ function PrecheckScreen({ onBack, onContinue }: { onBack: () => void; onContinue
                 <span className="check-row__icon">{check.icon}</span>
                 <div>
                   <h2>{check.title}</h2>
-                  <p>{state === "checking" ? "Đang xác minh…" : state === "waiting" ? "Đang chờ kiểm tra" : check.detail}</p>
+                  <p>{state === "checking" ? "Đang xác minh…" : state === "waiting" ? "Đang chờ kiểm tra" : check.id === "location" && location ? `Độ chính xác GPS ±${Math.round(location.accuracy)} m` : check.id === "time" && precheck ? `Ca bắt đầu lúc ${precheck.shift.startTime}` : check.id === "network" && !demoMode ? "Đã kết nối Firebase" : check.detail}</p>
                 </div>
                 <StatusDot state={state} />
               </article>
@@ -278,14 +311,14 @@ function PrecheckScreen({ onBack, onContinue }: { onBack: () => void; onContinue
 
         <div className="privacy-note">
           <span>i</span>
-          <p><strong>Dữ liệu của bạn được bảo vệ</strong>Vị trí chỉ được dùng để xác minh lúc chấm công. Bản thử nghiệm chưa gửi dữ liệu lên máy chủ.</p>
+          <p><strong>Dữ liệu của bạn được bảo vệ</strong>{demoMode ? "Vị trí chỉ được dùng để mô phỏng bước xác minh và chưa được gửi lên máy chủ." : "Vị trí chỉ được gửi an toàn tới Firebase khi chấm công và trong phiên làm việc."}</p>
         </div>
         {error && <p className="precheck-error" role="alert">{error}</p>}
       </main>
 
       <footer className="flow-footer">
-        <button className="primary-button" disabled={!complete} onClick={() => precheck && location && onContinue(precheck, location)}>
-          {complete ? "Tiếp tục xác thực khuôn mặt" : "Đang kiểm tra điều kiện…"}
+        <button className="primary-button" disabled={!complete && !error} onClick={() => error ? setRetryKey((value) => value + 1) : precheck && location && onContinue(precheck, location)}>
+          {complete ? "Tiếp tục xác thực khuôn mặt" : error ? "Thử lại kiểm tra" : "Đang kiểm tra điều kiện…"}
         </button>
       </footer>
     </section>
@@ -487,8 +520,10 @@ function SessionScreen({ result, precheck, onCheckOut, onHeartbeat }: { result: 
 }
 
 export function AttendancePrototype() {
+  const demoMode = firebaseDemoMode();
   const [screen, setScreen] = useState<Screen>("login");
   const [time, setTime] = useState("07:52");
+  const [date, setDate] = useState("");
   const [toast, setToast] = useState("");
   const [user, setUser] = useState<AttendanceUser | null>(null);
   const [precheck, setPrecheck] = useState<PrecheckData | null>(null);
@@ -496,14 +531,30 @@ export function AttendancePrototype() {
   const [checkInResult, setCheckInResult] = useState<CheckInResult | null>(null);
 
   useEffect(() => {
-    const update = () => setTime(new Intl.DateTimeFormat("vi-VN", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Ho_Chi_Minh" }).format(new Date()));
+    const update = () => {
+      const now = new Date();
+      setTime(new Intl.DateTimeFormat("vi-VN", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Ho_Chi_Minh" }).format(now));
+      setDate(new Intl.DateTimeFormat("vi-VN", { weekday: "long", day: "2-digit", month: "2-digit", year: "numeric", timeZone: "Asia/Ho_Chi_Minh" }).format(now));
+    };
     update();
     const timer = window.setInterval(update, 30000);
     return () => window.clearInterval(timer);
   }, []);
 
-  async function handleLogin(employeeId: string, password: string) {
-    const loggedInUser = await loginEmployee(employeeId, password);
+  useEffect(() => {
+    if (demoMode) return;
+    let active = true;
+    void restoreAuthenticatedUser().then((restoredUser) => {
+      if (active && restoredUser) {
+        setUser(restoredUser);
+        setScreen("home");
+      }
+    });
+    return () => { active = false; };
+  }, [demoMode]);
+
+  async function handleLogin(employeeId: string, password: string, remember: boolean) {
+    const loggedInUser = await loginEmployee(employeeId, password, remember);
     setUser(loggedInUser);
     setScreen("home");
   }
@@ -543,35 +594,35 @@ export function AttendancePrototype() {
     <main className="prototype-shell">
       <aside className="prototype-context">
         <Brand />
-        <p className="phase-tag">MVP · GIAI ĐOẠN 01</p>
+        <p className="phase-tag">MVP · GIAI ĐOẠN 02</p>
         <h2>Chấm công rõ ràng.<br /><span>Bằng chứng đáng tin.</span></h2>
         <p className="context-lead">Nền móng trải nghiệm nhân viên cho hệ thống chấm công đa lớp Face AI, vị trí và hiện diện tại cơ sở.</p>
         <div className="phase-progress">
-          <div className="phase-progress__head"><span>Tiến độ luồng nền tảng</span><strong>01 / 03</strong></div>
+          <div className="phase-progress__head"><span>Tiến độ luồng nền tảng</span><strong>02 / 03</strong></div>
           <div className="phase-progress__bar"><span /></div>
         </div>
         <ul className="scope-list">
-          <li className="done"><span>✓</span><div><strong>Đăng nhập nhân viên</strong><small>Mật khẩu và lối vào Passkey</small></div></li>
+          <li className="done"><span>✓</span><div><strong>Đăng nhập nhân viên</strong><small>Firebase Auth và phiên đăng nhập thật</small></div></li>
           <li className="done"><span>✓</span><div><strong>Home ca làm</strong><small>Trạng thái sẵn sàng theo thời gian thực</small></div></li>
-          <li className="active"><span>→</span><div><strong>Pre-check đa lớp</strong><small>Thiết bị, vị trí, thời gian, kết nối</small></div></li>
-          <li><span>·</span><div><strong>Face AI & Presence</strong><small>Tích hợp backend ở giai đoạn kế tiếp</small></div></li>
+          <li className="done"><span>✓</span><div><strong>Pre-check đa lớp</strong><small>Functions, phân ca và dữ liệu cơ sở thật</small></div></li>
+          <li className="active"><span>→</span><div><strong>Face AI & Presence</strong><small>Camera đã có · liveness AI là bước tiếp theo</small></div></li>
         </ul>
-        <p className="prototype-note"><span>●</span> Bản prototype tương tác · Dữ liệu mô phỏng</p>
+        <p className="prototype-note"><span>●</span> {demoMode ? "Bản prototype tương tác · Dữ liệu mô phỏng" : "Firebase production · Dữ liệu đồng bộ thật"}</p>
       </aside>
 
-      <section className="device-area" aria-label="Bản thử nghiệm ứng dụng nhân viên">
+      <section className="device-area" aria-label={demoMode ? "Bản thử nghiệm ứng dụng nhân viên" : "Ứng dụng chấm công nhân viên"}>
         <div className="device-caption"><span>EMPLOYEE PWA</span><span>390 × 844</span></div>
         <div className="device-frame">
           <div className="device-status"><span>{time}</span><span className="device-island" /><span>▮ ◒</span></div>
           {screen === "login" && <LoginScreen onLogin={handleLogin} />}
-          {screen === "home" && user && <HomeScreen time={time} user={user} precheck={precheck} onCheckIn={() => setScreen("precheck")} onLogout={() => void handleLogout()} />}
+          {screen === "home" && user && <HomeScreen time={time} date={date} user={user} precheck={precheck} onCheckIn={() => setScreen("precheck")} onLogout={() => void handleLogout()} />}
           {screen === "precheck" && <PrecheckScreen onBack={() => setScreen("home")} onContinue={(data, currentLocation) => { setPrecheck(data); setLocation(currentLocation); setScreen("face"); }} />}
           {screen === "face" && <FaceScreen onBack={() => setScreen("precheck")} onComplete={completeCheckIn} />}
           {screen === "success" && checkInResult && precheck && <SuccessScreen result={checkInResult} precheck={precheck} onStart={() => setScreen("session")} />}
           {screen === "session" && checkInResult && precheck && <SessionScreen result={checkInResult} precheck={precheck} onCheckOut={completeCheckOut} onHeartbeat={syncActiveSession} />}
           {toast && <div className="toast" role="status"><span>✓</span>{toast}</div>}
         </div>
-        <p className="demo-hint">Dùng mã demo có sẵn hoặc Passkey / Face ID để bắt đầu.</p>
+        <p className="demo-hint">{demoMode ? "Dùng mã demo có sẵn hoặc Passkey / Face ID để bắt đầu." : "Tài khoản nhân viên được xác thực và đồng bộ qua Firebase."}</p>
       </section>
     </main>
   );

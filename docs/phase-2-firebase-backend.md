@@ -13,9 +13,10 @@ Hạ tầng Firebase thật đã được tạo cho môi trường phát triển
 | Security Rules | Đã biên dịch và phát hành |
 | Composite indexes | Đã phát hành |
 | Dữ liệu nền demo | Đã tạo |
-| Cloud Functions | Build/test đạt; chưa phát hành vì project chưa bật Blaze |
+| Cloud Functions | Đã phát hành 4 callable Functions, runtime Node.js 22 |
+| Vercel production | Đã kết nối Firebase thật, `DEMO_MODE=false` |
 
-Frontend vẫn để `NEXT_PUBLIC_FIREBASE_DEMO_MODE=true`. Chỉ chuyển sang `false` sau khi Cloud Functions được phát hành để tránh một luồng thật bị dừng giữa chừng.
+Frontend production tại Vercel đã chạy `NEXT_PUBLIC_FIREBASE_DEMO_MODE=false`. Môi trường local vẫn có thể bật demo để phát triển giao diện mà không ghi dữ liệu thật.
 
 ## Luồng dữ liệu
 
@@ -107,15 +108,16 @@ Native wrapper/MDM có thể bổ sung SSID/BSSID như một tín hiệu rủi r
 - ESLint toàn dự án.
 - Unit tests cho Haversine và risk scoring.
 - Đăng nhập Auth thật thành công.
+- Callable `getPrecheck` đã đọc hồ sơ, phân ca, chi nhánh và ca làm production thành công.
+- Composite index phân ca đã được sửa đúng thứ tự truy vấn và phát hành.
 - Người dùng đã đăng nhập đọc được hồ sơ và chi nhánh qua Firestore Rules.
 - Request ẩn danh bị Firestore từ chối `403`.
 - Emulator smoke test đã được chuẩn bị tại `functions/scripts/smoke-emulators.cjs`; máy hiện tại cần cài Java và đưa lệnh `java` vào `PATH` trước khi chạy Firestore Emulator.
 
-## Việc cần làm trước production
+## Việc cần làm trước pilot doanh nghiệp
 
-1. Chủ dự án chủ động nâng Firebase lên Blaze, sau đó chạy `npm run firebase:deploy:functions`.
-2. Đổi `NEXT_PUBLIC_FIREBASE_DEMO_MODE=false` trên môi trường thật.
-3. Kết nối Face AI/liveness provider; không tự nhận camera preview là đã xác minh.
-4. Xây Presence Gateway hoặc QR động có chữ ký.
-5. Thêm App Check, rate limiting, retention policy cho ảnh/video và quy trình đồng ý dữ liệu sinh trắc.
-6. Xây Admin Dashboard để duyệt thiết bị, Face enrollment và attendance có risk cao.
+1. Kết nối Face AI/liveness provider; không tự nhận camera preview là đã xác minh.
+2. Xây Presence Gateway hoặc QR động có chữ ký.
+3. Thêm App Check, rate limiting, retention policy cho ảnh/video và quy trình đồng ý dữ liệu sinh trắc.
+4. Xây Admin Dashboard để duyệt thiết bị, Face enrollment và attendance có risk cao.
+5. Tách tài khoản kiểm thử khỏi dữ liệu pilot, xoay thông tin đăng nhập và áp dụng quy trình cấp tài khoản.

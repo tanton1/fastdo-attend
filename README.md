@@ -12,8 +12,8 @@ PWA chấm công nhân viên theo phong cách **Black Ignite**, kết hợp Fire
 - Region dữ liệu và Functions: `asia-southeast1`
 - Firebase Authentication: Email/Password đã bật
 - Firestore: database `(default)` đã tạo, rules và indexes đã triển khai
-- Cloud Functions: mã nguồn đã hoàn chỉnh và kiểm thử; cần nâng project lên gói Blaze để phát hành
-- Frontend mặc định chạy demo an toàn cho đến khi Functions được phát hành
+- Cloud Functions thế hệ 2: `getPrecheck`, `checkIn`, `checkOut`, `sendLocationHeartbeat` đang chạy Node.js 22
+- Vercel production chạy `NEXT_PUBLIC_FIREBASE_DEMO_MODE=false`; local vẫn có thể chọn demo hoặc emulator
 
 ## Chạy ứng dụng
 
@@ -65,12 +65,13 @@ npm run firebase:deploy:core
 npm run firebase:deploy:functions
 ```
 
-`firebase:deploy:core` triển khai Auth provider, Firestore rules và indexes. Cloud Functions thế hệ 2 yêu cầu project Firebase ở gói Blaze.
+`firebase:deploy:core` triển khai Firestore rules và indexes. Project production đã ở gói Blaze và Functions thế hệ 2 đã được phát hành.
 
 ## Tài liệu
 
 - [Nền móng giao diện](docs/phase-1-foundation.md)
 - [Firebase backend và database](docs/phase-2-firebase-backend.md)
+- [Kế hoạch giai đoạn tiếp theo](docs/phase-3-roadmap.md)
 
 ## Lưu ý về Face ID và Wi-Fi
 

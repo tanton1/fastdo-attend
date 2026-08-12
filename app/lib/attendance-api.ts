@@ -1,4 +1,4 @@
-import { signInWithEmailAndPassword, signOut } from "firebase/auth";
+import { browserLocalPersistence, browserSessionPersistence, sendPasswordResetEmail, setPersistence, signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { httpsCallable } from "firebase/functions";
 import { firebaseDemoMode, getFirebaseServices } from "./firebase-client";
 import type { AttendanceUser, CheckInResult, CheckOutResult, DeviceLocation, LocationHeartbeatResult, PrecheckData } from "./attendance-types";
@@ -35,7 +35,18 @@ function wait(milliseconds: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
-export async function loginEmployee(identifier: string, password: string): Promise<AttendanceUser> {
+function firebaseErrorMessage(reason: unknown, fallback: string): string {
+  const code = typeof reason === "object" && reason && "code" in reason ? String(reason.code) : "";
+  const message = reason instanceof Error ? reason.message : "";
+  if (code.includes("invalid-credential") || code.includes("wrong-password") || code.includes("user-not-found")) return "Mã nhân viên hoặc mật khẩu chưa đúng.";
+  if (code.includes("too-many-requests")) return "Tài khoản đang tạm khóa do thử quá nhiều lần. Vui lòng thử lại sau.";
+  if (code.includes("unauthenticated")) return "Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.";
+  if (code.includes("internal") || message === "INTERNAL") return "Dịch vụ chấm công đang gặp lỗi tạm thời. Vui lòng thử lại.";
+  if (message && !message.startsWith("Firebase:")) return message;
+  return fallback;
+}
+
+export async function loginEmployee(identifier: string, password: string, remember = true): Promise<AttendanceUser> {
   if (firebaseDemoMode()) {
     await wait(450);
     if (identifier.trim().toUpperCase() !== "FD0238" || password !== "fastdo2026") {
@@ -45,7 +56,13 @@ export async function loginEmployee(identifier: string, password: string): Promi
   }
 
   const { auth } = getFirebaseServices();
-  const credential = await signInWithEmailAndPassword(auth, employeeEmail(identifier), password);
+  let credential;
+  try {
+    await setPersistence(auth, remember ? browserLocalPersistence : browserSessionPersistence);
+    credential = await signInWithEmailAndPassword(auth, employeeEmail(identifier), password);
+  } catch (reason) {
+    throw new Error(firebaseErrorMessage(reason, "Không thể đăng nhập. Vui lòng thử lại."));
+  }
   return {
     uid: credential.user.uid,
     fullName: credential.user.displayName ?? identifier,
@@ -53,6 +70,34 @@ export async function loginEmployee(identifier: string, password: string): Promi
     email: credential.user.email ?? employeeEmail(identifier),
     isDemo: false,
   };
+}
+
+export async function restoreAuthenticatedUser(): Promise<AttendanceUser | null> {
+  if (firebaseDemoMode()) return null;
+  const { auth } = getFirebaseServices();
+  await auth.authStateReady();
+  const current = auth.currentUser;
+  if (!current) return null;
+  const email = current.email ?? "";
+  const employeeCode = email.includes("@") ? email.split("@")[0].toUpperCase() : "NHÂN VIÊN";
+  return {
+    uid: current.uid,
+    fullName: current.displayName ?? employeeCode,
+    employeeCode,
+    email,
+    isDemo: false,
+  };
+}
+
+export async function requestPasswordReset(identifier: string): Promise<string> {
+  if (!identifier.trim()) throw new Error("Nhập mã nhân viên hoặc email trước khi khôi phục mật khẩu.");
+  if (firebaseDemoMode()) return "Bản demo không gửi email. Hãy dùng mật khẩu fastdo2026.";
+  try {
+    await sendPasswordResetEmail(getFirebaseServices().auth, employeeEmail(identifier));
+    return "Đã gửi hướng dẫn đặt lại mật khẩu nếu tài khoản tồn tại.";
+  } catch (reason) {
+    throw new Error(firebaseErrorMessage(reason, "Chưa thể gửi email đặt lại mật khẩu. Vui lòng thử lại."));
+  }
 }
 
 export async function logoutEmployee(user: AttendanceUser | null): Promise<void> {
@@ -66,7 +111,11 @@ export async function getPrecheck(): Promise<PrecheckData> {
     return { ...demoPrecheck, serverTime: new Date().toISOString() };
   }
   const callable = httpsCallable<void, PrecheckData>(getFirebaseServices().functions, "getPrecheck");
-  return (await callable()).data;
+  try {
+    return (await callable()).data;
+  } catch (reason) {
+    throw new Error(firebaseErrorMessage(reason, "Không thể tải ca làm và điều kiện chấm công."));
+  }
 }
 
 export function getOrCreateDeviceId(): string {
