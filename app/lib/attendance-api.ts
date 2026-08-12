@@ -1,7 +1,7 @@
 import { signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { httpsCallable } from "firebase/functions";
 import { firebaseDemoMode, getFirebaseServices } from "./firebase-client";
-import type { AttendanceUser, CheckInResult, CheckOutResult, DeviceLocation, PrecheckData } from "./attendance-types";
+import type { AttendanceUser, CheckInResult, CheckOutResult, DeviceLocation, LocationHeartbeatResult, PrecheckData } from "./attendance-types";
 
 const demoUser: AttendanceUser = {
   uid: "demo_hai_au",
@@ -134,4 +134,19 @@ export async function submitCheckOut(sessionId: string, location: DeviceLocation
     clientTimestamp: new Date().toISOString(),
   });
   return response.data as CheckOutResult;
+}
+
+export async function sendLocationHeartbeat(sessionId: string, location: DeviceLocation): Promise<LocationHeartbeatResult> {
+  if (firebaseDemoMode()) {
+    await wait(350);
+    return {
+      insideGeofence: true,
+      distanceMeters: 12,
+      receivedAt: new Date().toISOString(),
+    };
+  }
+
+  const callable = httpsCallable(getFirebaseServices().functions, "sendLocationHeartbeat");
+  const response = await callable({ sessionId, location });
+  return response.data as LocationHeartbeatResult;
 }

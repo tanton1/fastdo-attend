@@ -56,3 +56,9 @@ export interface CheckOutResult {
   status: "VALID" | "PENDING_REVIEW";
   serverTimestamp: string;
 }
+
+export interface LocationHeartbeatResult {
+  insideGeofence: boolean;
+  distanceMeters: number;
+  receivedAt: string;
+}

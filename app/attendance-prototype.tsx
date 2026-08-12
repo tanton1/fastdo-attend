@@ -1,9 +1,9 @@
 "use client";
 
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { firebaseDemoMode } from "./lib/firebase-client";
-import { getPrecheck, loginEmployee, logoutEmployee, readCurrentLocation, submitCheckIn, submitCheckOut } from "./lib/attendance-api";
-import type { AttendanceUser, CheckInResult, DeviceLocation, PrecheckData } from "./lib/attendance-types";
+import { getPrecheck, loginEmployee, logoutEmployee, readCurrentLocation, sendLocationHeartbeat, submitCheckIn, submitCheckOut } from "./lib/attendance-api";
+import type { AttendanceUser, CheckInResult, DeviceLocation, LocationHeartbeatResult, PrecheckData } from "./lib/attendance-types";
 
 type Screen = "login" | "home" | "precheck" | "face" | "success" | "session";
 type CheckState = "waiting" | "checking" | "success" | "warning";
@@ -299,19 +299,44 @@ function FaceScreen({ onBack, onComplete }: { onBack: () => void; onComplete: ()
   const [scanState, setScanState] = useState<"idle" | "scanning" | "captured">("idle");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [demoBypassed, setDemoBypassed] = useState(false);
+  const demoMode = firebaseDemoMode();
 
   useEffect(() => () => streamRef.current?.getTracks().forEach((track) => track.stop()), []);
 
   async function startCamera() {
     setCameraState("loading");
+    setError("");
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setCameraState("denied");
+      setError("Thiết bị hoặc trình duyệt này không hỗ trợ truy cập camera.");
+      return;
+    }
+    const cameraRequest = navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false });
+    let timeoutId = 0;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false });
+      const timeout = new Promise<never>((_, reject) => {
+        timeoutId = window.setTimeout(() => reject(new Error("CAMERA_TIMEOUT")), 8000);
+      });
+      const stream = await Promise.race([cameraRequest, timeout]);
+      window.clearTimeout(timeoutId);
       streamRef.current = stream;
       if (videoRef.current) videoRef.current.srcObject = stream;
       setCameraState("ready");
-    } catch {
+    } catch (reason) {
+      window.clearTimeout(timeoutId);
+      void cameraRequest.then((lateStream) => lateStream.getTracks().forEach((track) => track.stop())).catch(() => undefined);
       setCameraState("denied");
+      setError(reason instanceof Error && reason.message === "CAMERA_TIMEOUT"
+        ? "Camera chưa được cấp quyền sau 8 giây. Hãy cấp quyền hoặc tiếp tục bằng bản mô phỏng."
+        : "Không thể mở camera. Hãy kiểm tra quyền camera của trình duyệt.");
     }
+  }
+
+  function continueDemo() {
+    setDemoBypassed(true);
+    setError("");
+    setScanState("captured");
   }
 
   function startScan() {
@@ -348,8 +373,8 @@ function FaceScreen({ onBack, onComplete }: { onBack: () => void; onComplete: ()
         </div>
 
         <div className="camera-copy">
-          <h2>{scanState === "captured" ? "Đã thu mẫu thử nghiệm" : cameraState === "ready" ? "Nhìn thẳng vào camera" : "Cho phép truy cập camera"}</h2>
-          <p>{scanState === "captured" ? "AI Face & Liveness sẽ được kết nối ở bước tiếp theo." : cameraState === "denied" ? "Không thể mở camera. Hãy kiểm tra quyền của trình duyệt." : "Giữ điện thoại ngang tầm mắt và ở nơi đủ sáng."}</p>
+          <h2>{demoBypassed ? "Mô phỏng Face AI" : scanState === "captured" ? "Đã thu mẫu thử nghiệm" : cameraState === "ready" ? "Nhìn thẳng vào camera" : "Cho phép truy cập camera"}</h2>
+          <p>{demoBypassed ? "Không có ảnh hoặc dữ liệu sinh trắc học nào được thu trong chế độ demo." : scanState === "captured" ? "AI Face & Liveness sẽ được kết nối ở bước tiếp theo." : cameraState === "denied" ? "Không thể mở camera. Hãy kiểm tra quyền của trình duyệt." : "Giữ điện thoại ngang tầm mắt và ở nơi đủ sáng."}</p>
         </div>
 
         <div className="liveness-status">
@@ -358,7 +383,8 @@ function FaceScreen({ onBack, onComplete }: { onBack: () => void; onComplete: ()
           <span className={scanState === "captured" ? "active" : ""}><b>✓</b>Chuyển động</span>
         </div>
 
-        {cameraState !== "ready" && <button className="primary-button camera-action" onClick={startCamera}>{cameraState === "loading" ? "Đang mở camera…" : "Bật camera"}</button>}
+        {cameraState !== "ready" && scanState !== "captured" && <button className="primary-button camera-action" onClick={startCamera} disabled={cameraState === "loading"}>{cameraState === "loading" ? "Đang mở camera…" : cameraState === "denied" ? "Thử lại camera" : "Bật camera"}</button>}
+        {demoMode && cameraState !== "ready" && scanState !== "captured" && <button className="secondary-button camera-demo-action" onClick={continueDemo}>Tiếp tục bản mô phỏng</button>}
         {cameraState === "ready" && scanState === "idle" && <button className="primary-button camera-action" onClick={startScan}>Bắt đầu quét thử</button>}
         {scanState === "scanning" && <button className="primary-button camera-action" disabled>Đang kiểm tra người thật…</button>}
         {error && <p className="camera-error" role="alert">{error}</p>}
@@ -388,10 +414,12 @@ function SuccessScreen({ result, precheck, onStart }: { result: CheckInResult; p
   );
 }
 
-function SessionScreen({ result, precheck, onCheckOut }: { result: CheckInResult; precheck: PrecheckData; onCheckOut: () => Promise<void> }) {
+function SessionScreen({ result, precheck, onCheckOut, onHeartbeat }: { result: CheckInResult; precheck: PrecheckData; onCheckOut: () => Promise<void>; onHeartbeat: () => Promise<LocationHeartbeatResult> }) {
   const [elapsed, setElapsed] = useState("00:00:00");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [heartbeat, setHeartbeat] = useState<LocationHeartbeatResult | null>(null);
+  const [heartbeatError, setHeartbeatError] = useState("");
 
   useEffect(() => {
     const startedAt = new Date(result.serverTimestamp).getTime();
@@ -406,6 +434,27 @@ function SessionScreen({ result, precheck, onCheckOut }: { result: CheckInResult
     const timer = window.setInterval(update, 1000);
     return () => window.clearInterval(timer);
   }, [result.serverTimestamp]);
+
+  useEffect(() => {
+    let active = true;
+    async function syncLocation() {
+      try {
+        const next = await onHeartbeat();
+        if (!active) return;
+        setHeartbeat(next);
+        setHeartbeatError("");
+      } catch (reason) {
+        if (!active) return;
+        setHeartbeatError(reason instanceof Error ? reason.message : "Không thể đồng bộ vị trí.");
+      }
+    }
+    void syncLocation();
+    const timer = window.setInterval(() => void syncLocation(), 60000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [onHeartbeat]);
 
   async function checkOut() {
     setSubmitting(true);
@@ -423,7 +472,7 @@ function SessionScreen({ result, precheck, onCheckOut }: { result: CheckInResult
       <p className="session-eyebrow">ĐANG TRONG CA</p>
       <h1 id="session-title">{elapsed}</h1>
       <p>Thời gian làm việc</p>
-      <div className="session-status"><span>●</span><div><strong>Trong khu vực làm việc</strong><small>{precheck.branch.name} · Đồng bộ Firebase</small></div></div>
+      <div className={`session-status ${heartbeat && !heartbeat.insideGeofence ? "session-status--outside" : ""}`} aria-live="polite"><span>●</span><div><strong>{heartbeatError ? "Chưa thể xác minh vị trí" : heartbeat && !heartbeat.insideGeofence ? "Ngoài khu vực làm việc" : "Trong khu vực làm việc"}</strong><small>{heartbeatError || (heartbeat ? `${precheck.branch.name} · ${heartbeat.distanceMeters} m · ${firebaseDemoMode() ? "Mô phỏng cục bộ" : "Đã đồng bộ Firebase"}` : "Đang đồng bộ vị trí…")}</small></div></div>
       <div className="session-card">
         <p><span>Check-in</span><strong>{new Intl.DateTimeFormat("vi-VN", { hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(result.serverTimestamp))}</strong></p>
         <p><span>Ca kết thúc</span><strong>{precheck.shift.endTime}</strong></p>
@@ -484,6 +533,12 @@ export function AttendancePrototype() {
     window.setTimeout(() => setToast(""), 4200);
   }
 
+  const syncActiveSession = useCallback(async () => {
+    if (!checkInResult) throw new Error("Không tìm thấy phiên làm việc đang hoạt động.");
+    const currentLocation = await readCurrentLocation(firebaseDemoMode());
+    return sendLocationHeartbeat(checkInResult.sessionId, currentLocation);
+  }, [checkInResult]);
+
   return (
     <main className="prototype-shell">
       <aside className="prototype-context">
@@ -513,7 +568,7 @@ export function AttendancePrototype() {
           {screen === "precheck" && <PrecheckScreen onBack={() => setScreen("home")} onContinue={(data, currentLocation) => { setPrecheck(data); setLocation(currentLocation); setScreen("face"); }} />}
           {screen === "face" && <FaceScreen onBack={() => setScreen("precheck")} onComplete={completeCheckIn} />}
           {screen === "success" && checkInResult && precheck && <SuccessScreen result={checkInResult} precheck={precheck} onStart={() => setScreen("session")} />}
-          {screen === "session" && checkInResult && precheck && <SessionScreen result={checkInResult} precheck={precheck} onCheckOut={completeCheckOut} />}
+          {screen === "session" && checkInResult && precheck && <SessionScreen result={checkInResult} precheck={precheck} onCheckOut={completeCheckOut} onHeartbeat={syncActiveSession} />}
           {toast && <div className="toast" role="status"><span>✓</span>{toast}</div>}
         </div>
         <p className="demo-hint">Dùng mã demo có sẵn hoặc Passkey / Face ID để bắt đầu.</p>
