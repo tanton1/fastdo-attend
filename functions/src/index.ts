@@ -5,9 +5,9 @@ import { setGlobalOptions } from "firebase-functions/v2/options";
 import { distanceInMeters } from "./domain/geo";
 import { calculateAttendanceRisk } from "./domain/risk";
 import { deviceCanCheckIn, sanitizePlatform } from "./domain/device";
-import type { DeviceDocument, DeviceStatus } from "./domain/types";
+import type { DeviceDocument, DeviceStatus, EmployeeDocument } from "./domain/types";
 import { buildAuditLogDocument, writeAuditLog } from "./services/audit";
-import { loadAttendanceContext, loadManagerContext, requireUserId } from "./services/context";
+import { MANAGER_ROLES, loadAttendanceContext, loadEmployeeContext, loadManagerContext, requireUserId } from "./services/context";
 import { publicDeviceStatus, readOwnedDevice, registerOrTouchDevice, requireDeviceId } from "./services/devices";
 import type { DeviceRegistrationInput } from "./services/devices";
 import { enforceRateLimit } from "./services/rate-limit";
@@ -55,6 +55,21 @@ function requireAttendanceInput(input: AttendanceInput): void {
   }
 }
 
+export const getMyProfile = onCall(callableOptions, async (request) => {
+  const userId = requireUserId(request);
+  const context = await loadEmployeeContext(userId);
+  await enforceRateLimit(userId, "getMyProfile", 30);
+  return {
+    uid: userId,
+    fullName: context.employee.fullName,
+    employeeCode: context.employee.employeeCode,
+    email: context.employee.email,
+    role: context.employee.role,
+    companyId: context.employee.companyId,
+    canManageDevices: MANAGER_ROLES.includes(context.employee.role),
+  };
+});
+
 export const registerDevice = onCall<DeviceRegistrationInput>(callableOptions, async (request) => {
   const userId = requireUserId(request);
   const context = await loadAttendanceContext(userId);
@@ -90,13 +105,26 @@ export const listDevices = onCall(callableOptions, async (request) => {
     .limit(100)
     .get();
 
+  const devices = snapshots.docs.map((snapshot) => ({ id: snapshot.id, data: snapshot.data() as DeviceDocument }));
+  const employeeIds = [...new Set(devices.map(({ data }) => data.userId))];
+  const employeeSnapshots = employeeIds.length
+    ? await getFirestore().getAll(...employeeIds.map((employeeId) => getFirestore().doc(`employees/${employeeId}`)))
+    : [];
+  const employees = new Map(employeeSnapshots.filter((snapshot) => snapshot.exists).map((snapshot) => [snapshot.id, snapshot.data() as EmployeeDocument]));
+
   return {
-    devices: snapshots.docs.map((snapshot) => ({
-      ...publicDeviceStatus(snapshot.id, snapshot.data() as DeviceDocument),
-      userId: snapshot.data().userId,
-      createdAt: snapshot.data().createdAt?.toDate?.().toISOString() ?? null,
-      lastSeenAt: snapshot.data().lastSeenAt?.toDate?.().toISOString() ?? null,
-    })),
+    devices: devices.map(({ id, data }) => {
+      const owner = employees.get(data.userId);
+      return {
+        ...publicDeviceStatus(id, data),
+        userId: data.userId,
+        employeeName: owner?.fullName ?? "Nhân viên",
+        employeeCode: owner?.employeeCode ?? "—",
+        createdAt: data.createdAt?.toDate?.().toISOString() ?? null,
+        lastSeenAt: data.lastSeenAt?.toDate?.().toISOString() ?? null,
+        reviewedAt: data.reviewedAt?.toDate?.().toISOString() ?? null,
+      };
+    }),
   };
 });
 

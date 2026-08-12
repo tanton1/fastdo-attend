@@ -2,10 +2,10 @@
 
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { firebaseDemoMode } from "./lib/firebase-client";
-import { getPrecheck, loginEmployee, logoutEmployee, readCurrentLocation, requestPasswordReset, restoreAuthenticatedUser, sendLocationHeartbeat, submitCheckIn, submitCheckOut } from "./lib/attendance-api";
-import type { AttendanceUser, CheckInResult, DeviceLocation, LocationHeartbeatResult, PrecheckData } from "./lib/attendance-types";
+import { getPrecheck, listManagedDevices, loginEmployee, logoutEmployee, readCurrentLocation, requestPasswordReset, restoreAuthenticatedUser, reviewManagedDevice, sendLocationHeartbeat, submitCheckIn, submitCheckOut } from "./lib/attendance-api";
+import type { AdminDevice, AttendanceUser, CheckInResult, DeviceLocation, DeviceStatus, LocationHeartbeatResult, PrecheckData } from "./lib/attendance-types";
 
-type Screen = "login" | "home" | "precheck" | "face" | "success" | "session";
+type Screen = "login" | "home" | "devices" | "precheck" | "face" | "success" | "session";
 type CheckState = "waiting" | "checking" | "success" | "warning";
 
 const checks = [
@@ -159,7 +159,7 @@ function LoginScreen({ onLogin }: { onLogin: (employeeId: string, password: stri
   );
 }
 
-function HomeScreen({ time, date, user, precheck, onCheckIn, onLogout }: { time: string; date: string; user: AttendanceUser; precheck: PrecheckData | null; onCheckIn: () => void; onLogout: () => void }) {
+function HomeScreen({ time, date, user, precheck, onCheckIn, onManageDevices, onLogout }: { time: string; date: string; user: AttendanceUser; precheck: PrecheckData | null; onCheckIn: () => void; onManageDevices: () => void; onLogout: () => void }) {
   return (
     <section className="screen home-screen" aria-labelledby="home-title">
       <header className="mobile-header">
@@ -219,8 +219,140 @@ function HomeScreen({ time, date, user, precheck, onCheckIn, onLogout }: { time:
         <button><span>□</span>Lịch làm</button>
         <button className="nav-main" onClick={onCheckIn} aria-label="Bắt đầu chấm công"><span>⌘</span></button>
         <button><span>◷</span>Lịch sử</button>
-        <button><span>♙</span>Cá nhân</button>
+        {user.canManageDevices
+          ? <button onClick={onManageDevices}><span>⚙</span>Quản trị</button>
+          : <button><span>♙</span>Cá nhân</button>}
       </nav>
+    </section>
+  );
+}
+
+function formatDeviceTime(value: string | null): string {
+  if (!value) return "Chưa có dữ liệu";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Chưa có dữ liệu";
+  return new Intl.DateTimeFormat("vi-VN", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: "Asia/Ho_Chi_Minh",
+  }).format(date);
+}
+
+function DeviceAdminScreen({ user, onBack }: { user: AttendanceUser; onBack: () => void }) {
+  const [devices, setDevices] = useState<AdminDevice[]>([]);
+  const [filter, setFilter] = useState<"ALL" | DeviceStatus>("ALL");
+  const [loading, setLoading] = useState(true);
+  const [reviewingId, setReviewingId] = useState("");
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      setDevices(await listManagedDevices());
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Không thể tải danh sách thiết bị.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    void listManagedDevices()
+      .then((result) => { if (active) setDevices(result); })
+      .catch((reason) => { if (active) setError(reason instanceof Error ? reason.message : "Không thể tải danh sách thiết bị."); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, []);
+
+  async function review(device: AdminDevice, decision: Extract<DeviceStatus, "TRUSTED" | "BLOCKED">) {
+    if (decision === "BLOCKED" && !window.confirm(`Khóa thiết bị ${device.label} của ${device.employeeName}?`)) return;
+    setReviewingId(device.id);
+    setError("");
+    setNotice("");
+    try {
+      const result = await reviewManagedDevice(device.id, decision);
+      setDevices((current) => current.map((item) => item.id === device.id ? {
+        ...item,
+        status: result.status,
+        trusted: result.trusted,
+        isBlocked: result.status === "BLOCKED",
+        reviewedAt: new Date().toISOString(),
+      } : item));
+      setNotice(result.status === "TRUSTED" ? `Đã duyệt thiết bị của ${device.employeeName}.` : `Đã khóa thiết bị của ${device.employeeName}.`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Không thể cập nhật thiết bị.");
+    } finally {
+      setReviewingId("");
+    }
+  }
+
+  const counts = {
+    PENDING: devices.filter((device) => device.status === "PENDING").length,
+    TRUSTED: devices.filter((device) => device.status === "TRUSTED").length,
+    BLOCKED: devices.filter((device) => device.status === "BLOCKED").length,
+  };
+  const visibleDevices = filter === "ALL" ? devices : devices.filter((device) => device.status === filter);
+
+  return (
+    <section className="screen admin-screen" aria-labelledby="device-admin-title">
+      <header className="admin-header">
+        <button className="back-button" onClick={onBack} aria-label="Quay lại">←</button>
+        <div>
+          <span>QUẢN TRỊ THIẾT BỊ</span>
+          <h1 id="device-admin-title">Kiểm soát truy cập</h1>
+        </div>
+        <button className="admin-refresh" onClick={() => void refresh()} disabled={loading} aria-label="Tải lại danh sách">↻</button>
+      </header>
+
+      <main className="admin-content">
+        <section className="admin-profile" aria-label="Phiên quản trị">
+          <span className="admin-profile__avatar">{user.fullName.trim().split(/\s+/).slice(-2).map((part) => part[0]).join("").toUpperCase()}</span>
+          <div><strong>{user.fullName}</strong><small>{user.employeeCode} · {user.role.replaceAll("_", " ")}</small></div>
+          <span className="admin-profile__secure">● ĐÃ XÁC THỰC</span>
+        </section>
+
+        <div className="device-stats">
+          <button className={filter === "PENDING" ? "active" : ""} onClick={() => setFilter("PENDING")}><strong>{counts.PENDING}</strong><span>Chờ duyệt</span></button>
+          <button className={filter === "TRUSTED" ? "active" : ""} onClick={() => setFilter("TRUSTED")}><strong>{counts.TRUSTED}</strong><span>Đã duyệt</span></button>
+          <button className={filter === "BLOCKED" ? "active" : ""} onClick={() => setFilter("BLOCKED")}><strong>{counts.BLOCKED}</strong><span>Đã khóa</span></button>
+        </div>
+
+        <div className="device-list-head">
+          <div><span>THIẾT BỊ TRONG DOANH NGHIỆP</span><strong>{filter === "ALL" ? "Tất cả" : filter === "PENDING" ? "Chờ duyệt" : filter === "TRUSTED" ? "Đã duyệt" : "Đã khóa"}</strong></div>
+          {filter !== "ALL" && <button onClick={() => setFilter("ALL")}>Xem tất cả</button>}
+        </div>
+
+        {error && <p className="admin-message admin-message--error" role="alert">{error}</p>}
+        {notice && <p className="admin-message admin-message--success" role="status">{notice}</p>}
+
+        <div className="device-list" aria-live="polite">
+          {loading && [0, 1, 2].map((item) => <div className="device-card device-card--loading" key={item}><span /><span /><span /></div>)}
+          {!loading && visibleDevices.length === 0 && <div className="device-empty"><span>▣</span><strong>Không có thiết bị</strong><p>Không tìm thấy thiết bị phù hợp với bộ lọc hiện tại.</p></div>}
+          {!loading && visibleDevices.map((device) => (
+            <article className={`device-card device-card--${device.status.toLowerCase()}`} key={device.id}>
+              <div className="device-card__head">
+                <span className="device-owner-avatar">{device.employeeName.trim().split(/\s+/).slice(-2).map((part) => part[0]).join("").toUpperCase()}</span>
+                <div><strong>{device.employeeName}</strong><small>{device.employeeCode}</small></div>
+                <span className={`device-badge device-badge--${device.status.toLowerCase()}`}>{device.status === "PENDING" ? "CHỜ DUYỆT" : device.status === "TRUSTED" ? "TIN CẬY" : "ĐÃ KHÓA"}</span>
+              </div>
+              <div className="device-card__body">
+                <p><span>▣</span><strong>{device.label}</strong></p>
+                <p><span>◎</span>Hoạt động: {formatDeviceTime(device.lastSeenAt)}</p>
+                <p><span>＋</span>Đăng ký: {formatDeviceTime(device.createdAt)}</p>
+              </div>
+              <div className="device-actions">
+                {device.status !== "TRUSTED" && <button className="device-action device-action--approve" onClick={() => void review(device, "TRUSTED")} disabled={reviewingId === device.id}>{reviewingId === device.id ? "Đang xử lý…" : "✓ Duyệt thiết bị"}</button>}
+                {device.status !== "BLOCKED" && <button className="device-action device-action--block" onClick={() => void review(device, "BLOCKED")} disabled={reviewingId === device.id}>⊘ Khóa</button>}
+              </div>
+            </article>
+          ))}
+        </div>
+      </main>
     </section>
   );
 }
@@ -549,12 +681,16 @@ export function AttendancePrototype() {
   useEffect(() => {
     if (demoMode) return;
     let active = true;
-    void restoreAuthenticatedUser().then((restoredUser) => {
-      if (active && restoredUser) {
-        setUser(restoredUser);
-        setScreen("home");
-      }
-    });
+    void restoreAuthenticatedUser()
+      .then((restoredUser) => {
+        if (active && restoredUser) {
+          setUser(restoredUser);
+          setScreen("home");
+        }
+      })
+      .catch(() => {
+        if (active) setScreen("login");
+      });
     return () => { active = false; };
   }, [demoMode]);
 
@@ -620,7 +756,8 @@ export function AttendancePrototype() {
         <div className="device-frame">
           <div className="device-status"><span>{time}</span><span className="device-island" /><span>▮ ◒</span></div>
           {screen === "login" && <LoginScreen onLogin={handleLogin} />}
-          {screen === "home" && user && <HomeScreen time={time} date={date} user={user} precheck={precheck} onCheckIn={() => setScreen("precheck")} onLogout={() => void handleLogout()} />}
+          {screen === "home" && user && <HomeScreen time={time} date={date} user={user} precheck={precheck} onCheckIn={() => setScreen("precheck")} onManageDevices={() => setScreen("devices")} onLogout={() => void handleLogout()} />}
+          {screen === "devices" && user?.canManageDevices && <DeviceAdminScreen user={user} onBack={() => setScreen("home")} />}
           {screen === "precheck" && <PrecheckScreen onBack={() => setScreen("home")} onContinue={(data, currentLocation) => { setPrecheck(data); setLocation(currentLocation); setScreen("face"); }} />}
           {screen === "face" && <FaceScreen onBack={() => setScreen("precheck")} onComplete={completeCheckIn} />}
           {screen === "success" && checkInResult && precheck && <SuccessScreen result={checkInResult} precheck={precheck} onStart={() => setScreen("session")} />}

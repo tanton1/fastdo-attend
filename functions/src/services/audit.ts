@@ -1,6 +1,6 @@
 import { Timestamp, getFirestore } from "firebase-admin/firestore";
 import type { CallableRequest } from "firebase-functions/v2/https";
-import type { AttendanceContext } from "./context";
+import type { EmployeeContext } from "./context";
 
 interface AuditInput {
   action: string;
@@ -11,7 +11,7 @@ interface AuditInput {
 
 export function buildAuditLogDocument(
   request: CallableRequest<unknown>,
-  context: AttendanceContext,
+  context: EmployeeContext,
   input: AuditInput,
 ) {
   const userAgent = request.rawRequest.get("user-agent")?.slice(0, 180) ?? "unknown";
@@ -31,7 +31,7 @@ export function buildAuditLogDocument(
 
 export async function writeAuditLog(
   request: CallableRequest<unknown>,
-  context: AttendanceContext,
+  context: EmployeeContext,
   input: AuditInput,
 ): Promise<void> {
   await getFirestore().collection("auditLogs").add(buildAuditLogDocument(request, context, input));

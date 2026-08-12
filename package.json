@@ -14,8 +14,8 @@
     "test": "npm run build:sites && node --test tests/rendered-html.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "test:functions": "npm --prefix functions test",
-    "firebase:deploy:core": "firebase deploy --only auth,firestore:rules,firestore:indexes",
-    "firebase:deploy:functions": "firebase deploy --only functions",
+    "firebase:deploy:core": "firebase deploy --project fastdo-attend-2026 --only auth,firestore:rules,firestore:indexes",
+    "firebase:deploy:functions": "firebase deploy --project fastdo-attend-2026 --only functions",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {

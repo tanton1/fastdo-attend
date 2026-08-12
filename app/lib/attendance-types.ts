@@ -1,9 +1,36 @@
+export type EmployeeRole = "SUPER_ADMIN" | "COMPANY_ADMIN" | "HR" | "MANAGER" | "EMPLOYEE";
+export type DeviceStatus = "PENDING" | "TRUSTED" | "BLOCKED";
+
 export interface AttendanceUser {
   uid: string;
   fullName: string;
   employeeCode: string;
   email: string;
+  role: EmployeeRole;
+  companyId: string;
+  canManageDevices: boolean;
   isDemo: boolean;
+}
+
+export interface AdminDevice {
+  id: string;
+  label: string;
+  platform: string;
+  status: DeviceStatus;
+  trusted: boolean;
+  isBlocked: boolean;
+  userId: string;
+  employeeName: string;
+  employeeCode: string;
+  createdAt: string | null;
+  lastSeenAt: string | null;
+  reviewedAt: string | null;
+}
+
+export interface DeviceReviewResult {
+  deviceId: string;
+  status: Extract<DeviceStatus, "TRUSTED" | "BLOCKED">;
+  trusted: boolean;
 }
 
 export interface PrecheckData {
@@ -22,7 +49,7 @@ export interface PrecheckData {
     id: string;
     label: string;
     platform: string;
-    status: "PENDING" | "TRUSTED" | "BLOCKED";
+    status: DeviceStatus;
     trusted: boolean;
     isBlocked: boolean;
   };

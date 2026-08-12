@@ -20,8 +20,9 @@ Ngoài bốn API chấm công, backend có thêm:
 - `getDeviceStatus`: trả trạng thái thiết bị của chính nhân viên.
 - `listDevices`: chỉ dành cho `SUPER_ADMIN`, `COMPANY_ADMIN`, `HR`, `MANAGER` trong cùng doanh nghiệp.
 - `reviewDevice`: quản trị viên duyệt hoặc chặn thiết bị và tạo audit log bất biến.
+- `getMyProfile`: trả hồ sơ, vai trò và quyền quản trị của người dùng đang đăng nhập.
 
-Tất cả tám callable Functions production đều yêu cầu đồng thời Firebase Auth và App Check hợp lệ. Emulator tự tắt enforcement để phục vụ kiểm thử local.
+Tất cả chín callable Functions production đều yêu cầu đồng thời Firebase Auth và App Check hợp lệ. Emulator tự tắt enforcement để phục vụ kiểm thử local.
 
 ## Trạng thái thiết bị
 
@@ -60,4 +61,4 @@ Backend kiểm tra ownership theo `companyId + userId + deviceId`; client không
 
 ## Giới hạn còn lại
 
-Mã thiết bị hiện là UUID cục bộ được quản trị viên duyệt, phù hợp MVP nhưng vẫn có thể bị sao chép trên thiết bị đã xâm nhập. Giai đoạn tăng cường nên gắn enrollment với khóa WebAuthn/passkey phần cứng hoặc native device attestation. Giao diện quản trị đầy đủ để xem và duyệt thiết bị nằm trong sprint Admin Dashboard.
+Mã thiết bị hiện là UUID cục bộ được quản trị viên duyệt, phù hợp MVP nhưng vẫn có thể bị sao chép trên thiết bị đã xâm nhập. Giai đoạn tăng cường nên gắn enrollment với khóa WebAuthn/passkey phần cứng hoặc native device attestation.

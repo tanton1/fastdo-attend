@@ -12,9 +12,10 @@ PWA chấm công nhân viên theo phong cách **Black Ignite**, kết hợp Fire
 - Region dữ liệu và Functions: `asia-southeast1`
 - Firebase Authentication: Email/Password đã bật
 - Firestore: database `(default)` đã tạo, rules và indexes đã triển khai
-- Cloud Functions thế hệ 2: 8 callable API chấm công và quản lý thiết bị đang chạy Node.js 22
+- Cloud Functions thế hệ 2: 9 callable API chấm công, hồ sơ và quản lý thiết bị đang chạy Node.js 22
 - Firebase App Check: reCAPTCHA Enterprise đã bật enforcement cho toàn bộ callable Functions production
 - Thiết bị mới phải được quản trị viên duyệt trước khi GPS/check-in được thực hiện
+- Quản trị viên có bảng điều khiển trong PWA để lọc, duyệt, khóa và mở khóa thiết bị
 - Vercel production chạy `NEXT_PUBLIC_FIREBASE_DEMO_MODE=false`; local vẫn có thể chọn demo hoặc emulator
 
 ## Chạy ứng dụng
@@ -75,6 +76,7 @@ npm run firebase:deploy:functions
 - [Firebase backend và database](docs/phase-2-firebase-backend.md)
 - [Kế hoạch giai đoạn tiếp theo](docs/phase-3-roadmap.md)
 - [App Check và thiết bị tin cậy](docs/phase-4-security-device.md)
+- [Bảng quản trị thiết bị](docs/phase-5-admin-device.md)
 
 ## Lưu ý về Face ID và Wi-Fi
 

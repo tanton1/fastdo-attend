@@ -1,15 +1,35 @@
 import { browserLocalPersistence, browserSessionPersistence, sendPasswordResetEmail, setPersistence, signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { httpsCallable } from "firebase/functions";
 import { firebaseDemoMode, getFirebaseServices } from "./firebase-client";
-import type { AttendanceUser, CheckInResult, CheckOutResult, DeviceLocation, LocationHeartbeatResult, PrecheckData } from "./attendance-types";
+import type { AdminDevice, AttendanceUser, CheckInResult, CheckOutResult, DeviceLocation, DeviceReviewResult, DeviceStatus, LocationHeartbeatResult, PrecheckData } from "./attendance-types";
 
 const demoUser: AttendanceUser = {
   uid: "demo_hai_au",
   fullName: "Hải Âu",
   employeeCode: "FD0238",
   email: "fd0238@fastdo.attend",
+  role: "COMPANY_ADMIN",
+  companyId: "fastdo_demo",
+  canManageDevices: true,
   isDemo: true,
 };
+
+const demoDevices: AdminDevice[] = [
+  {
+    id: "d6f91fe4-54e0-4dc7-b4b0-6d9e86ed1f19",
+    label: "Chrome · windows-web",
+    platform: "windows-web",
+    status: "PENDING",
+    trusted: false,
+    isBlocked: false,
+    userId: demoUser.uid,
+    employeeName: demoUser.fullName,
+    employeeCode: demoUser.employeeCode,
+    createdAt: new Date().toISOString(),
+    lastSeenAt: new Date().toISOString(),
+    reviewedAt: null,
+  },
+];
 
 const demoPrecheck: PrecheckData = {
   serverTime: new Date().toISOString(),
@@ -50,6 +70,15 @@ function firebaseErrorMessage(reason: unknown, fallback: string): string {
   return fallback;
 }
 
+async function loadMyProfile(): Promise<AttendanceUser> {
+  const callable = httpsCallable<undefined, Omit<AttendanceUser, "isDemo">>(getFirebaseServices().functions, "getMyProfile");
+  try {
+    return { ...(await callable()).data, isDemo: false };
+  } catch (reason) {
+    throw new Error(firebaseErrorMessage(reason, "Không thể tải hồ sơ và quyền truy cập của bạn."));
+  }
+}
+
 export async function loginEmployee(identifier: string, password: string, remember = true): Promise<AttendanceUser> {
   if (firebaseDemoMode()) {
     await wait(450);
@@ -60,20 +89,13 @@ export async function loginEmployee(identifier: string, password: string, rememb
   }
 
   const { auth } = getFirebaseServices();
-  let credential;
   try {
     await setPersistence(auth, remember ? browserLocalPersistence : browserSessionPersistence);
-    credential = await signInWithEmailAndPassword(auth, employeeEmail(identifier), password);
+    await signInWithEmailAndPassword(auth, employeeEmail(identifier), password);
   } catch (reason) {
     throw new Error(firebaseErrorMessage(reason, "Không thể đăng nhập. Vui lòng thử lại."));
   }
-  return {
-    uid: credential.user.uid,
-    fullName: credential.user.displayName ?? identifier,
-    employeeCode: identifier.toUpperCase(),
-    email: credential.user.email ?? employeeEmail(identifier),
-    isDemo: false,
-  };
+  return loadMyProfile();
 }
 
 export async function restoreAuthenticatedUser(): Promise<AttendanceUser | null> {
@@ -82,15 +104,36 @@ export async function restoreAuthenticatedUser(): Promise<AttendanceUser | null>
   await auth.authStateReady();
   const current = auth.currentUser;
   if (!current) return null;
-  const email = current.email ?? "";
-  const employeeCode = email.includes("@") ? email.split("@")[0].toUpperCase() : "NHÂN VIÊN";
-  return {
-    uid: current.uid,
-    fullName: current.displayName ?? employeeCode,
-    employeeCode,
-    email,
-    isDemo: false,
-  };
+  return loadMyProfile();
+}
+
+export async function listManagedDevices(): Promise<AdminDevice[]> {
+  if (firebaseDemoMode()) {
+    await wait(400);
+    return demoDevices.map((device) => ({ ...device }));
+  }
+  const callable = httpsCallable<undefined, { devices: AdminDevice[] }>(getFirebaseServices().functions, "listDevices");
+  try {
+    return (await callable()).data.devices;
+  } catch (reason) {
+    throw new Error(firebaseErrorMessage(reason, "Không thể tải danh sách thiết bị."));
+  }
+}
+
+export async function reviewManagedDevice(deviceId: string, decision: Extract<DeviceStatus, "TRUSTED" | "BLOCKED">): Promise<DeviceReviewResult> {
+  if (firebaseDemoMode()) {
+    await wait(350);
+    return { deviceId, status: decision, trusted: decision === "TRUSTED" };
+  }
+  const callable = httpsCallable<{ deviceId: string; decision: Extract<DeviceStatus, "TRUSTED" | "BLOCKED">; reason: string }, DeviceReviewResult>(
+    getFirebaseServices().functions,
+    "reviewDevice",
+  );
+  try {
+    return (await callable({ deviceId, decision, reason: decision === "TRUSTED" ? "Duyệt từ bảng quản trị" : "Khóa từ bảng quản trị" })).data;
+  } catch (reason) {
+    throw new Error(firebaseErrorMessage(reason, "Không thể cập nhật trạng thái thiết bị."));
+  }
 }
 
 export async function requestPasswordReset(identifier: string): Promise<string> {

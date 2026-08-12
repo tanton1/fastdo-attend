@@ -1,11 +1,16 @@
 import { HttpsError } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
 import type { CallableRequest } from "firebase-functions/v2/https";
-import type { BranchDocument, EmployeeDocument, ShiftAssignmentDocument, ShiftDocument } from "../domain/types";
+import type { BranchDocument, EmployeeDocument, EmployeeRole, ShiftAssignmentDocument, ShiftDocument } from "../domain/types";
 
-export interface AttendanceContext {
+export const MANAGER_ROLES: EmployeeRole[] = ["SUPER_ADMIN", "COMPANY_ADMIN", "HR", "MANAGER"];
+
+export interface EmployeeContext {
   userId: string;
   employee: EmployeeDocument;
+}
+
+export interface AttendanceContext extends EmployeeContext {
   branchId: string;
   branch: BranchDocument;
   shiftId: string;
@@ -19,7 +24,7 @@ export function requireUserId(request: CallableRequest<unknown>): string {
   return request.auth.uid;
 }
 
-export async function loadAttendanceContext(userId: string): Promise<AttendanceContext> {
+export async function loadEmployeeContext(userId: string): Promise<EmployeeContext> {
   const db = getFirestore();
   const employeeSnapshot = await db.doc(`employees/${userId}`).get();
   if (!employeeSnapshot.exists) {
@@ -30,6 +35,13 @@ export async function loadAttendanceContext(userId: string): Promise<AttendanceC
   if (employee.status !== "ACTIVE") {
     throw new HttpsError("permission-denied", "Tài khoản nhân viên không hoạt động.");
   }
+
+  return { userId, employee };
+}
+
+export async function loadAttendanceContext(userId: string): Promise<AttendanceContext> {
+  const db = getFirestore();
+  const employeeContext = await loadEmployeeContext(userId);
 
   const now = new Date();
   const assignments = await db
@@ -55,8 +67,7 @@ export async function loadAttendanceContext(userId: string): Promise<AttendanceC
   }
 
   return {
-    userId,
-    employee,
+    ...employeeContext,
     branchId: assignment.branchId,
     branch: branchSnapshot.data() as BranchDocument,
     shiftId: assignment.shiftId,
@@ -64,9 +75,9 @@ export async function loadAttendanceContext(userId: string): Promise<AttendanceC
   };
 }
 
-export async function loadManagerContext(userId: string): Promise<AttendanceContext> {
-  const context = await loadAttendanceContext(userId);
-  if (!["SUPER_ADMIN", "COMPANY_ADMIN", "HR", "MANAGER"].includes(context.employee.role)) {
+export async function loadManagerContext(userId: string): Promise<EmployeeContext> {
+  const context = await loadEmployeeContext(userId);
+  if (!MANAGER_ROLES.includes(context.employee.role)) {
     throw new HttpsError("permission-denied", "Bạn không có quyền quản lý thiết bị.");
   }
   return context;
