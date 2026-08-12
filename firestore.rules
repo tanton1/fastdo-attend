@@ -1,0 +1,99 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function employeePath() {
+      return /databases/$(database)/documents/employees/$(request.auth.uid);
+    }
+
+    function hasEmployeeProfile() {
+      return signedIn() && exists(employeePath());
+    }
+
+    function employeeProfile() {
+      return get(employeePath()).data;
+    }
+
+    function companyId() {
+      return employeeProfile().companyId;
+    }
+
+    function isActiveEmployee() {
+      return hasEmployeeProfile() && employeeProfile().status == 'ACTIVE';
+    }
+
+    function isManager() {
+      return isActiveEmployee() && employeeProfile().role in ['SUPER_ADMIN', 'COMPANY_ADMIN', 'HR', 'MANAGER'];
+    }
+
+    function belongsToCompany(data) {
+      return isActiveEmployee() && data.companyId == companyId();
+    }
+
+    function ownsRecord(data) {
+      return isActiveEmployee() && data.userId == request.auth.uid && belongsToCompany(data);
+    }
+
+    match /companies/{companyDocumentId} {
+      allow read: if isActiveEmployee() && companyDocumentId == companyId();
+      allow write: if false;
+    }
+
+    match /employees/{userId} {
+      allow read: if isActiveEmployee() && (userId == request.auth.uid || (isManager() && belongsToCompany(resource.data)));
+      allow write: if false;
+    }
+
+    match /branches/{branchId} {
+      allow read: if belongsToCompany(resource.data) && resource.data.isActive == true;
+      allow write: if false;
+    }
+
+    match /shifts/{shiftId} {
+      allow read: if belongsToCompany(resource.data) && resource.data.isActive == true;
+      allow write: if false;
+    }
+
+    match /shiftAssignments/{assignmentId} {
+      allow read: if ownsRecord(resource.data) || (isManager() && belongsToCompany(resource.data));
+      allow write: if false;
+    }
+
+    match /devices/{deviceId} {
+      allow read: if ownsRecord(resource.data) || (isManager() && belongsToCompany(resource.data));
+      allow write: if false;
+    }
+
+    match /attendanceEvents/{eventId} {
+      allow read: if ownsRecord(resource.data) || (isManager() && belongsToCompany(resource.data));
+      allow write: if false;
+    }
+
+    match /workSessions/{sessionId} {
+      allow read: if ownsRecord(resource.data) || (isManager() && belongsToCompany(resource.data));
+      allow write: if false;
+    }
+
+    match /alerts/{alertId} {
+      allow read: if ownsRecord(resource.data) || (isManager() && belongsToCompany(resource.data));
+      allow write: if false;
+    }
+
+    match /attendanceRequests/{requestId} {
+      allow read: if ownsRecord(resource.data) || (isManager() && belongsToCompany(resource.data));
+      allow create: if isActiveEmployee()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.companyId == companyId()
+        && request.resource.data.status == 'PENDING';
+      allow update, delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

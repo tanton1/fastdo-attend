@@ -1,0 +1,5 @@
+.tools
+.wrangler
+dist
+functions/node_modules
+functions/lib
