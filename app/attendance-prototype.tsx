@@ -762,6 +762,26 @@ function exportReportCsv(report: AttendanceReport) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+function mergeAttendanceReportPages(previous: AttendanceReport, next: AttendanceReport): AttendanceReport {
+  const rows = [...previous.rows, ...next.rows].filter((row, index, all) => all.findIndex((candidate) => candidate.id === row.id) === index);
+  const riskTotal = rows.reduce((sum, row) => sum + row.riskScore, 0);
+  return {
+    ...next,
+    rows,
+    pageSummary: {
+      returnedEvents: rows.length,
+      checkIns: rows.filter((row) => row.type === "CHECK_IN").length,
+      checkOuts: rows.filter((row) => row.type === "CHECK_OUT").length,
+      valid: rows.filter((row) => row.status === "VALID").length,
+      pendingReview: rows.filter((row) => row.status === "PENDING_REVIEW").length,
+      rejected: rows.filter((row) => row.status === "REJECTED").length,
+      uniqueEmployees: new Set(rows.map((row) => row.userId)).size,
+      averageRiskScore: rows.length ? Math.round((riskTotal / rows.length) * 10) / 10 : 0,
+    },
+    pagination: { ...next.pagination, returned: rows.length },
+  };
+}
+
 function ReportsAdminPanel() {
   const [mode, setMode] = useState<"REALTIME" | "REPORT">("REALTIME");
   const [branches, setBranches] = useState<WorkforceBranch[]>([]);
@@ -807,11 +827,25 @@ function ReportsAdminPanel() {
     finally { setLoading(false); }
   }
 
+  async function loadMoreReport() {
+    if (!report?.pagination.nextCursor || loading) return;
+    setLoading(true);
+    setError("");
+    try {
+      const next = await getAttendanceReport({ startDate, endDate, branchId: branchId || undefined, limit: 500, cursor: report.pagination.nextCursor });
+      setReport((current) => current ? mergeAttendanceReportPages(current, next) : next);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Không thể tải trang báo cáo tiếp theo.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
     <section className="reports-panel" aria-labelledby="reports-title">
       <div className="workforce-heading"><div><small>OPERATIONS CENTER</small><h2 id="reports-title">Báo cáo chấm công</h2></div>{mode === "REALTIME" && <span>● Tự làm mới 30s</span>}</div>
       <div className="report-mode-tabs"><button className={mode === "REALTIME" ? "active" : ""} onClick={() => setMode("REALTIME")}>Realtime monitor</button><button className={mode === "REPORT" ? "active" : ""} onClick={() => setMode("REPORT")}>Báo cáo kỳ</button></div>
-      <label className="report-branch"><span>Chi nhánh</span><select value={branchId} onChange={(event) => setBranchId(event.target.value)}><option value="">Tất cả chi nhánh</option>{branches.map((branch) => <option value={branch.id} key={branch.id}>{branch.name}</option>)}</select></label>
+      <label className="report-branch"><span>Chi nhánh</span><select value={branchId} onChange={(event) => { setBranchId(event.target.value); setReport(null); }}><option value="">Tất cả chi nhánh</option>{branches.map((branch) => <option value={branch.id} key={branch.id}>{branch.name}</option>)}</select></label>
 
       {mode === "REALTIME" ? <>
         <div className="report-actions"><small>{monitor ? `Cập nhật ${formatReportTime(monitor.generatedAt)}` : "Chưa có dữ liệu"}</small><button onClick={() => void loadMonitor()} disabled={loading}>↻ Làm mới</button></div>
@@ -821,9 +855,9 @@ function ReportsAdminPanel() {
         {(monitor.truncated || monitor.hasMore) && <p className="admin-message admin-message--warning" role="status">Đang hiển thị {monitor.pagination.returned} phiên trong trang dữ liệu trả về; vẫn còn phiên khác. Hãy lọc theo chi nhánh để xem đầy đủ hơn.</p>}
         <div className="realtime-list" aria-live="polite">{monitor.rows.length === 0 ? <div className="device-empty"><span>◷</span><strong>Chưa có nhân viên trong ca</strong><p>Dữ liệu sẽ xuất hiện khi có phiên chấm công đang hoạt động.</p></div> : monitor.rows.map((row) => <article className={`realtime-card ${row.insideGeofence === false || row.heartbeatStale ? "has-alert" : row.insideGeofence === null ? "is-neutral" : ""}`} key={row.sessionId}><span className="device-owner-avatar">{row.employeeName.trim().split(/\s+/).slice(-2).map((part) => part[0]).join("").toUpperCase()}</span><div><strong>{row.employeeName}</strong><small>{row.employeeCode} · {row.branchName}</small><p>{row.heartbeatStale ? "Mất tín hiệu heartbeat" : row.insideGeofence === null ? "Chưa có dữ liệu GPS" : row.insideGeofence ? "Trong vùng làm việc" : `Ngoài vùng${row.distanceMeters === null ? "" : ` · ${Math.round(row.distanceMeters)} m`}`}</p></div><b>{row.riskScore}</b></article>)}</div></>}
       </> : <>
-        <form className="report-filters" onSubmit={(event) => void loadReport(event)}><label><span>Từ ngày</span><input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} /></label><label><span>Đến ngày</span><input type="date" min={startDate} value={endDate} onChange={(event) => setEndDate(event.target.value)} /></label><button type="submit" disabled={loading}>{loading ? "Đang tải…" : "Xem báo cáo"}</button></form>
+        <form className="report-filters" onSubmit={(event) => void loadReport(event)}><label><span>Từ ngày</span><input type="date" value={startDate} onChange={(event) => { setStartDate(event.target.value); setReport(null); }} /></label><label><span>Đến ngày</span><input type="date" min={startDate} value={endDate} onChange={(event) => { setEndDate(event.target.value); setReport(null); }} /></label><button type="submit" disabled={loading}>{loading ? "Đang tải…" : "Xem báo cáo"}</button></form>
         {error && <p className="admin-message admin-message--error" role="alert">{error}</p>}
-        {report && <><div className="report-summary"><div><strong>{report.pageSummary.returnedEvents}</strong><span>Sự kiện trả về</span></div><div><strong>{report.pageSummary.uniqueEmployees}</strong><span>NV trong trang</span></div><div><strong>{report.pageSummary.pendingReview}</strong><span>Chờ duyệt</span></div><div><strong>{report.pageSummary.averageRiskScore}</strong><span>Rủi ro TB trang</span></div></div>{(report.truncated || report.hasMore) && <p className="admin-message admin-message--warning" role="alert">Trang dữ liệu trả về {report.pagination.returned}/{report.pagination.limit} bản ghi và vẫn còn dữ liệu khác. CSV bị khóa để tránh xuất báo cáo thiếu; hãy thu hẹp ngày hoặc chọn một chi nhánh.</p>}<div className="report-export"><p>{report.pagination.returned} bản ghi trả về · {report.range.timezone}</p><button onClick={() => exportReportCsv(report)} disabled={report.truncated || report.hasMore} title={report.truncated || report.hasMore ? "Thu hẹp bộ lọc để xuất báo cáo đầy đủ" : undefined}>{report.truncated || report.hasMore ? "CSV chưa đầy đủ" : "↓ Xuất CSV"}</button></div><div className="report-list">{report.rows.length === 0 ? <div className="device-empty"><span>□</span><strong>Không có dữ liệu trong kỳ</strong><p>Thử đổi khoảng ngày hoặc chọn tất cả chi nhánh.</p></div> : report.rows.map((row) => <article className="report-row" key={row.id}><div><strong>{row.employeeName}</strong><small>{row.employeeCode} · {row.branchName}</small></div><div><b className={`report-status report-status--${row.status.toLowerCase()}`}>{row.status === "VALID" ? "Hợp lệ" : row.status === "REJECTED" ? "Từ chối" : "Chờ duyệt"}</b><small>{formatReportTime(row.serverTimestamp, report.range.timezone)} · Rủi ro {row.riskScore}</small></div></article>)}</div></>}
+        {report && <><div className="report-summary"><div><strong>{report.pageSummary.returnedEvents}</strong><span>Sự kiện đã tải</span></div><div><strong>{report.pageSummary.uniqueEmployees}</strong><span>NV đã tải</span></div><div><strong>{report.pageSummary.pendingReview}</strong><span>Chờ duyệt</span></div><div><strong>{report.pageSummary.averageRiskScore}</strong><span>Rủi ro TB</span></div></div>{(report.truncated || report.hasMore) && <p className="admin-message admin-message--warning" role="alert">Đã tải {report.pagination.returned} bản ghi và vẫn còn dữ liệu khác. Tải thêm để xem đủ; CSV chỉ mở sau khi tải xong toàn bộ kỳ.</p>}<div className="report-export"><p>{report.pagination.returned} bản ghi đã tải · {report.range.timezone}</p><div className="report-export__actions">{report.hasMore && <button onClick={() => void loadMoreReport()} disabled={loading}>{loading ? "Đang tải…" : "↓ Tải thêm"}</button>}<button onClick={() => exportReportCsv(report)} disabled={report.truncated || report.hasMore} title={report.truncated || report.hasMore ? "Tải hết các trang để xuất báo cáo đầy đủ" : undefined}>{report.truncated || report.hasMore ? "CSV chưa đầy đủ" : "↓ Xuất CSV"}</button></div></div><div className="report-list">{report.rows.length === 0 ? <div className="device-empty"><span>□</span><strong>Không có dữ liệu trong kỳ</strong><p>Thử đổi khoảng ngày hoặc chọn tất cả chi nhánh.</p></div> : report.rows.map((row) => <article className="report-row" key={row.id}><div><strong>{row.employeeName}</strong><small>{row.employeeCode} · {row.branchName}</small></div><div><b className={`report-status report-status--${row.status.toLowerCase()}`}>{row.status === "VALID" ? "Hợp lệ" : row.status === "REJECTED" ? "Từ chối" : "Chờ duyệt"}</b><small>{formatReportTime(row.serverTimestamp, report.range.timezone)} · Rủi ro {row.riskScore}</small></div></article>)}</div></>}
         {!report && !loading && <div className="device-empty"><span>▤</span><strong>Chọn kỳ báo cáo</strong><p>Chọn khoảng ngày rồi tải dữ liệu chấm công thật từ Firebase.</p></div>}
       </>}
     </section>

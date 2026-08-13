@@ -1,12 +1,12 @@
 import { initializeApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { randomInt, randomUUID } from "node:crypto";
-import { GeoPoint, Timestamp, getFirestore } from "firebase-admin/firestore";
+import { FieldPath, GeoPoint, Timestamp, getFirestore } from "firebase-admin/firestore";
 import { HttpsError, onCall } from "firebase-functions/v2/https";
 import { setGlobalOptions } from "firebase-functions/v2/options";
 import { distanceInMeters } from "./domain/geo";
 import { calculateAttendanceRisk } from "./domain/risk";
-import { boundedPage, zonedDateBoundaryUtc } from "./domain/report";
+import { boundedPage, decodeAttendanceReportCursor, encodeAttendanceReportCursor, zonedDateBoundaryUtc } from "./domain/report";
 import { deviceCanCheckIn, sanitizePlatform } from "./domain/device";
 import {
   faceIsRequired,
@@ -162,6 +162,7 @@ interface AttendanceReportInput {
   endDate: string;
   branchId?: string;
   limit?: number;
+  cursor?: string;
 }
 
 interface RealtimeMonitorInput {
@@ -588,6 +589,12 @@ export const getAttendanceReport = onCall<AttendanceReportInput>(callableOptions
     throw new HttpsError("invalid-argument", "Báo cáo chỉ hỗ trợ tối đa 31 ngày.");
   }
   const limit = Number.isInteger(request.data?.limit) ? Math.max(1, Math.min(Number(request.data.limit), 500)) : 200;
+  let cursor: ReturnType<typeof decodeAttendanceReportCursor>;
+  try {
+    cursor = decodeAttendanceReportCursor(request.data?.cursor);
+  } catch {
+    throw new HttpsError("invalid-argument", "Con trỏ báo cáo không hợp lệ hoặc đã hỏng.");
+  }
   const scopedBranchIds = TENANT_WIDE_REPORT_ROLES.includes(context.employee.role)
     ? null
     : context.employee.branchIds ?? [];
@@ -598,7 +605,7 @@ export const getAttendanceReport = onCall<AttendanceReportInput>(callableOptions
       rows: [],
       truncated: false,
       hasMore: false,
-      pagination: { limit, returned: 0, hasMore: false },
+      pagination: { limit, returned: 0, hasMore: false, nextCursor: null },
     };
   }
   const db = getFirestore();
@@ -609,13 +616,19 @@ export const getAttendanceReport = onCall<AttendanceReportInput>(callableOptions
       .where("serverTimestamp", ">=", start)
       .where("serverTimestamp", "<=", end);
     if (scopeBranchId) query = query.where("branchId", "==", scopeBranchId);
-    return query.orderBy("serverTimestamp", "desc").limit(limit + 1).get();
+    query = query.orderBy("serverTimestamp", "desc").orderBy(FieldPath.documentId(), "desc");
+    if (cursor) query = query.startAfter(Timestamp.fromMillis(cursor.timestamp), cursor.documentId);
+    return query.limit(limit + 1).get();
   };
   const snapshots = queryBranchIds
     ? await Promise.all(queryBranchIds.slice(0, 20).map((id) => makeQuery(id)))
     : [await makeQuery(null)];
   const eventDocuments = snapshots.flatMap((snapshot) => snapshot.docs)
-    .sort((left, right) => Number(right.data().serverTimestamp?.toMillis?.() ?? 0) - Number(left.data().serverTimestamp?.toMillis?.() ?? 0));
+    .sort((left, right) => {
+      const timestampDelta = Number(right.data().serverTimestamp?.toMillis?.() ?? 0)
+        - Number(left.data().serverTimestamp?.toMillis?.() ?? 0);
+      return timestampDelta || right.id.localeCompare(left.id);
+    });
   const eventPage = boundedPage(eventDocuments, limit);
   const truncated = eventPage.hasMore;
   const selectedEvents = eventPage.rows;
@@ -663,13 +676,20 @@ export const getAttendanceReport = onCall<AttendanceReportInput>(callableOptions
     uniqueEmployees: new Set(rows.map((row) => row.userId)).size,
     averageRiskScore: rows.length ? Math.round(riskTotal / rows.length * 10) / 10 : 0,
   };
+  const lastEvent = selectedEvents.at(-1);
+  const nextCursor = truncated && lastEvent
+    ? encodeAttendanceReportCursor({
+      timestamp: Number(lastEvent.data().serverTimestamp?.toMillis?.() ?? 0),
+      documentId: lastEvent.id,
+    })
+    : null;
   return {
     range: { startDate: request.data.startDate, endDate: request.data.endDate, branchId, timezone },
     pageSummary,
     rows,
     truncated,
     hasMore: truncated,
-    pagination: { limit, returned: rows.length, hasMore: truncated },
+    pagination: { limit, returned: rows.length, hasMore: truncated, nextCursor },
   };
 });
 

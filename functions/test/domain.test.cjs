@@ -30,7 +30,7 @@ const {
   resolveEffectiveFacePolicy,
   safeFaceTelemetry,
 } = require("../lib/domain/pilot.js");
-const { boundedPage, zonedDateBoundaryUtc } = require("../lib/domain/report.js");
+const { boundedPage, decodeAttendanceReportCursor, encodeAttendanceReportCursor, zonedDateBoundaryUtc } = require("../lib/domain/report.js");
 
 test("distance is zero for the same coordinate", () => {
   assert.equal(distanceInMeters({ latitude: 16.0678, longitude: 108.1895 }, { latitude: 16.0678, longitude: 108.1895 }), 0);
@@ -223,6 +223,14 @@ test("bounded report pages expose truncation without claiming a global total", (
   assert.deepEqual(boundedPage([1, 2, 3], 2), { rows: [1, 2], hasMore: true });
   assert.deepEqual(boundedPage([1, 2], 2), { rows: [1, 2], hasMore: false });
   assert.throws(() => boundedPage([1], 0));
+});
+
+test("report cursors round-trip and reject malformed client input", () => {
+  const encoded = encodeAttendanceReportCursor({ timestamp: Date.UTC(2026, 7, 13, 3), documentId: "attendanceEvent_123" });
+  assert.deepEqual(decodeAttendanceReportCursor(encoded), { timestamp: Date.UTC(2026, 7, 13, 3), documentId: "attendanceEvent_123" });
+  assert.equal(decodeAttendanceReportCursor(undefined), null);
+  assert.throws(() => decodeAttendanceReportCursor("not-a-cursor"));
+  assert.throws(() => decodeAttendanceReportCursor(42));
 });
 
 test("retention backfill only adds or shortens expiry and never extends it", () => {

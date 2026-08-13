@@ -18,7 +18,7 @@ PWA chấm công nhân viên theo phong cách **Black Ignite**, kết hợp Fire
 - Quản trị viên có bảng điều khiển trong PWA để lọc, duyệt, khóa và mở khóa thiết bị
 - Quản trị viên có thể tạo/cập nhật nhân viên, cấp mật khẩu tạm một lần, phân ca và reset Face enrollment trong đúng phạm vi công ty; tài khoản mới bị chặn khỏi nghiệp vụ cho tới khi đổi mật khẩu thành công
 - Chính sách pilot theo chi nhánh hỗ trợ `OFF`, `MONITOR`, `REQUIRED`, cửa sổ thời gian và cohort ổn định; chỉ `SUPER_ADMIN`/`COMPANY_ADMIN` được sửa policy
-- Báo cáo và realtime monitor trả một trang dữ liệu có giới hạn cùng `truncated/hasMore`; báo cáo chưa có cursor lấy trang kế tiếp và CSV bị khóa khi kết quả chưa đầy đủ
+- Báo cáo và realtime monitor trả dữ liệu có giới hạn cùng `truncated/hasMore`; attendance report hỗ trợ cursor opaque để tải tiếp các trang và chỉ mở CSV sau khi tải đủ kỳ
 - QR hiện diện được ký bằng khóa trong Secret Manager, hết hạn sau 45 giây; proof của nhân viên chỉ dùng một lần
 - Face embedding được tạo trong trình duyệt; raw image/video không được upload. Template được mã hóa AES-256-GCM bằng khóa Secret Manager; Face proof và Presence proof đều do server phát, chỉ dùng một lần và được tiêu thụ nguyên tử cùng check-in
 - Face profile mới dùng `retentionExpiresAt` với Firestore TTL và kiểm tra hết hạn ở runtime. Profile Phase 7/policy bị rút ngắn cần chạy one-off backfill; dự án không dùng lifecycle trigger riêng nên trạng thái nhân viên có thể được sửa ở lần precheck/Face tiếp theo

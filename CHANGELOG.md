@@ -1,5 +1,11 @@
 # Changelog
 
+## Phase 9 — Report pagination (2026-08-13)
+
+- Attendance report có cursor opaque theo `serverTimestamp` + document ID, giữ nguyên tenant/branch scope và giới hạn tối đa 500 dòng mỗi trang.
+- Admin Reports có nút “Tải thêm”, gộp các trang không trùng ID và chỉ mở CSV khi toàn bộ kỳ đã tải xong.
+- Bổ sung kiểm thử cursor encode/decode, tie-break thứ tự ổn định và composite indexes cho truy vấn phân trang.
+
 ## Phase 8 — Pilot hardening (2026-08-13)
 
 Phase 8 là bản phát hành kỹ thuật cho Pilot Control, báo cáo, realtime monitor và quyền riêng tư Face AI. Việc triển khai mã không đồng nghĩa pilot đã được phê duyệt; các release gate bên dưới vẫn phải hoàn tất trước khi mở cho người lao động.

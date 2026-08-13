@@ -104,7 +104,7 @@ function demoAttendanceReport(from: string, to: string): AttendanceReport {
     ],
     truncated: false,
     hasMore: false,
-    pagination: { limit: 500, returned: 2, hasMore: false },
+    pagination: { limit: 500, returned: 2, hasMore: false, nextCursor: null },
   };
 }
 
@@ -473,7 +473,7 @@ export async function updatePilotPolicy(input: PilotPolicyUpdate): Promise<Pilot
   }
 }
 
-export async function getAttendanceReport(input: { startDate: string; endDate: string; branchId?: string; limit?: number }): Promise<AttendanceReport> {
+export async function getAttendanceReport(input: { startDate: string; endDate: string; branchId?: string; limit?: number; cursor?: string }): Promise<AttendanceReport> {
   if (firebaseDemoMode()) {
     await wait(450);
     return demoAttendanceReport(input.startDate, input.endDate);

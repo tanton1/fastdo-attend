@@ -88,9 +88,9 @@ Rollout theo phần trăm chọn cohort ổn định bằng định danh tenant/
 | Thuộc tính | Hợp đồng |
 | --- | --- |
 | Quyền | `SUPER_ADMIN`, `COMPANY_ADMIN`, `HR` xem trong tenant; `MANAGER` chỉ xem các chi nhánh được gán. Branch filter luôn phải thuộc scope người gọi. |
-| Input | `{ startDate, endDate, branchId?, limit? }`; ngày ở dạng `YYYY-MM-DD`. |
+| Input | `{ startDate, endDate, branchId?, limit?, cursor? }`; ngày ở dạng `YYYY-MM-DD`, `cursor` là token opaque do response trước trả về. |
 | Output | `{ range, pageSummary, rows, truncated, hasMore, pagination }`; `range` nêu timezone hiệu lực. `pageSummary` chỉ tổng hợp các dòng đang trả về, không phải tổng toàn kỳ khi `truncated=true`. Mỗi dòng chỉ chứa dữ liệu nghiệp vụ cần thiết như nhân viên, chi nhánh, loại sự kiện, thời gian, trạng thái, khoảng cách/độ chính xác cần thiết và risk decision đã làm sạch. |
-| Giới hạn | Tối đa 31 ngày và tối đa 500 dòng mỗi request. Backend đọc thêm một dòng để xác định `hasMore`; chưa có cursor hoặc API lấy trang kế tiếp. Khi `truncated=true`, UI phải cảnh báo, khóa CSV thiếu dữ liệu và yêu cầu thu hẹp ngày/chi nhánh. |
+| Giới hạn | Tối đa 31 ngày và tối đa 500 dòng mỗi request. Backend đọc thêm một dòng để xác định `hasMore` và trả `nextCursor` opaque theo timestamp + document ID để lấy trang kế tiếp. Khi còn trang, UI cảnh báo, cho phép tải thêm và khóa CSV thiếu dữ liệu. |
 | Bảo mật | Không trả descriptor, face profile, liveness payload, proof token, QR token, secret, vị trí chính xác hơn nhu cầu nghiệp vụ hoặc metadata thiết bị không cần thiết. |
 | Tính đúng | Dòng trả về được lọc theo timezone doanh nghiệp/chi nhánh, không đếm trùng request idempotent và nêu rõ attendance `REJECTED`/`PENDING_REVIEW`. Không dùng `pageSummary` làm tổng kỳ hoặc dữ liệu tính lương khi `truncated=true`. |
 
@@ -123,7 +123,7 @@ Sau khi rút consent, `startFaceSession` cho mục đích xác minh phải bị 
 - `SUPER_ADMIN`, `COMPANY_ADMIN`, `HR` và `MANAGER` phải tuân theo ma trận quyền hiện hữu; quyền đọc report không mặc nhiên đồng nghĩa quyền sửa policy.
 - Mọi query report/realtime bắt buộc có `companyId` phía server và giới hạn chi nhánh. ID thuộc tenant khác phải trả lỗi không tiết lộ sự tồn tại của tài nguyên.
 - `updatePilotPolicy` và `withdrawFaceConsent` ghi audit server-only, không chứa secret hoặc dữ liệu sinh trắc học; audit policy hiện là metadata vận hành tối thiểu, không phải full diff hay trường lý do riêng.
-- Report giới hạn khoảng ngày và kích thước trang để tránh data exfiltration và truy vấn gây chi phí không kiểm soát. API hiện chỉ trả trang đầu cùng cờ `truncated/hasMore`, chưa hỗ trợ cursor.
+- Report giới hạn khoảng ngày và kích thước trang để tránh data exfiltration và truy vấn gây chi phí không kiểm soát. Cursor chỉ là token opaque, không chứa dữ liệu Face hay thông tin tenant; mỗi request vẫn kiểm tra lại quyền truy cập.
 - Payload lỗi/log không chứa descriptor, tọa độ đầy đủ, QR/presence token, Face proof, password hoặc camera telemetry.
 - Chỉ các field policy đã biết được chuẩn hóa và lưu; field bổ sung bị bỏ qua. Giá trị mặc định nằm phía server để client cũ không làm policy suy giảm theo cách âm thầm.
 - Firestore Rules tiếp tục chặn client đọc/ghi trực tiếp `faceProfiles`, Face session/proof, pilot policy và dữ liệu audit nhạy cảm.
@@ -193,7 +193,7 @@ Mỗi hàng cần ghi thiết bị/OS/browser chính xác, mạng, trạng thái
 | Mạng | Wi-Fi cơ sở, 4G/5G, độ trễ cao, mất mạng giữa các bước, đổi mạng | Không tạo event trùng; timeout/retry có idempotency; không tuyên bố đã check-in trước khi server xác nhận. |
 | Consent | Đồng ý mới, consent version cũ, rút consent, request rút lặp lại, enrollment lại | Xóa/vô hiệu template và proof ngay; luồng thay thế hoạt động; consent mới không được suy ra từ camera permission cũ. |
 | Feature flag | `OFF`, `MONITOR`, cohort `REQUIRED`, nhiều chi nhánh | Backend và UI cùng policy; ngoài cohort không bị enforce; kill switch có hiệu lực không cần deploy. |
-| Report | Múi giờ, biên ngày, DST nơi áp dụng, branch filter, `limit+1` và trạng thái `truncated` | Không đếm trùng, không vượt tenant/branch, khoảng quá lớn bị từ chối, không lộ dữ liệu Face; CSV bị khóa khi trang chưa đầy đủ. Cursor, employee/status filter và phân trang kế tiếp là backlog, không phải tính năng hiện tại. |
+| Report | Múi giờ, biên ngày, DST nơi áp dụng, branch filter, `limit+1`, cursor và trạng thái `truncated` | Không đếm trùng, không vượt tenant/branch, khoảng quá lớn bị từ chối, không lộ dữ liệu Face; CSV bị khóa khi còn trang chưa tải. Employee/status filter và XLSX payroll vẫn là backlog. |
 | Realtime | Không có sự kiện, lưu lượng đồng thời, sự kiện trễ, refresh nhanh, nhiều branch | `generatedAt` rõ ràng, dữ liệu có giới hạn, trạng thái `unknownGeofence` không bị gắn nhầm là ngoài vùng và response không trả tọa độ GPS tuyệt đối. |
 
 ## Trạng thái kiểm thử và khoảng trống đã biết
@@ -206,7 +206,7 @@ Những khoảng trống phải ghi rõ trong release note và chưa được co
 - Chưa hoàn thành ma trận thiết bị thật gồm tối thiểu hai iPhone và hai Android cho camera, GPS, PWA standalone, permission, đổi mạng và app background/foreground.
 - Active head-turn vẫn là liveness phía client mức MVP; chưa có PAD được kiểm thử độc lập hoặc chứng nhận ISO/IEC 30107-3.
 - Backfill retention cần được chạy dry-run rồi apply có phê duyệt; các profile bị `skippedInvalid` phải được xử lý riêng và không được coi là đã có TTL.
-- Report/realtime chỉ có trang đầu cùng `hasMore`; chưa có cursor để lấy trang tiếp theo. Không dùng `pageSummary` bị truncated làm tổng kỳ, bảng lương hay quyết định kỷ luật.
+- Realtime hiện vẫn trả một trang cùng `hasMore`; attendance report có cursor để lấy trang tiếp theo. Không dùng `pageSummary` bị truncated làm tổng kỳ, bảng lương hay quyết định kỷ luật.
 - QA sau triển khai cần kiểm tra quyền `COMPANY_ADMIN/HR/MANAGER`, kill switch, rút consent, timezone hiển thị và cảnh báo dữ liệu chưa đầy đủ.
 
 ## Exit criteria cho pilot

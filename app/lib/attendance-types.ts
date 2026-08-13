@@ -271,7 +271,7 @@ export interface AttendanceReport {
   rows: AttendanceReportRecord[];
   truncated: boolean;
   hasMore: boolean;
-  pagination: { limit: number; returned: number; hasMore: boolean };
+  pagination: { limit: number; returned: number; hasMore: boolean; nextCursor: string | null };
 }
 
 export interface RealtimeAttendanceEntry {
