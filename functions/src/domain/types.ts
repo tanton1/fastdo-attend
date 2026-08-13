@@ -11,6 +11,10 @@ export interface EmployeeDocument {
   branchIds: string[];
   status: "ACTIVE" | "INACTIVE";
   faceEnrollmentStatus: "NOT_STARTED" | "PENDING" | "APPROVED" | "REJECTED";
+  mustChangePassword?: boolean;
+  passwordChangedAt?: Timestamp | null;
+  createdAt?: Timestamp;
+  updatedAt?: Timestamp;
 }
 
 export interface BranchDocument {
@@ -79,6 +83,56 @@ export interface PresenceProofDocument {
   challengeId: string;
   userId: string;
   deviceId: string;
+  createdAt: Timestamp;
+  expiresAt: Timestamp;
+  usedAt: Timestamp | null;
+  usedEventId: string | null;
+}
+
+export type FacePurpose = "ENROLL" | "VERIFY";
+export type FaceChallenge = "TURN_LEFT" | "TURN_RIGHT";
+
+export interface FaceSessionDocument {
+  companyId: string;
+  branchId: string;
+  userId: string;
+  deviceId: string;
+  purpose: FacePurpose;
+  challenge: FaceChallenge;
+  status: "ACTIVE" | "COMPLETED" | "FAILED";
+  createdAt: Timestamp;
+  expiresAt: Timestamp;
+  consentVersion: "biometric-consent-v1" | null;
+  consentAcceptedAt: Timestamp | null;
+  usedAt: Timestamp | null;
+  outcome: "ENROLLED" | "VERIFIED" | "FACE_MISMATCH" | "LIVENESS_FAILED" | "RESET" | null;
+}
+
+export interface FaceProfileDocument {
+  companyId: string;
+  userId: string;
+  encryptedDescriptor: string;
+  descriptorIv: string;
+  descriptorAuthTag: string;
+  descriptorVersion: 1;
+  consentVersion: "biometric-consent-v1";
+  consentAcceptedAt: Timestamp;
+  consentPurpose: FacePurpose;
+  enrolledAt: Timestamp;
+  updatedAt: Timestamp;
+  lastVerifiedAt: Timestamp | null;
+}
+
+export interface FaceProofDocument {
+  companyId: string;
+  branchId: string;
+  userId: string;
+  deviceId: string;
+  faceSessionId: string;
+  purpose: FacePurpose;
+  faceVerified: true;
+  livenessVerified: true;
+  matchScore: number;
   createdAt: Timestamp;
   expiresAt: Timestamp;
   usedAt: Timestamp | null;

@@ -1,9 +1,9 @@
 # FASTDO ATTEND
 
-PWA chấm công nhân viên theo phong cách **Black Ignite**, kết hợp Firebase Authentication, Firestore, GPS geofence, thiết bị tin cậy, Presence QR ký số và risk scoring. Luồng hiện có:
+PWA chấm công nhân viên theo phong cách **Black Ignite**, kết hợp Firebase Authentication, Firestore, GPS geofence, thiết bị tin cậy, Face AI xử lý trên thiết bị, Presence QR ký số và risk scoring. Luồng hiện có:
 
 ```text
-Đăng nhập → Home → Pre-check → Camera → Presence QR → Check-in → Đang trong ca → Check-out
+Đăng nhập → Home → Pre-check → Face AI → Presence QR → Check-in → Đang trong ca → Check-out
 ```
 
 ## Trạng thái Firebase
@@ -12,11 +12,14 @@ PWA chấm công nhân viên theo phong cách **Black Ignite**, kết hợp Fire
 - Region dữ liệu và Functions: `asia-southeast1`
 - Firebase Authentication: Email/Password đã bật
 - Firestore: database `(default)` đã tạo, rules và indexes đã triển khai
-- Cloud Functions thế hệ 2: 11 callable API chấm công, hồ sơ, thiết bị và Presence QR đang chạy Node.js 22
+- Cloud Functions thế hệ 2: 19 callable API chấm công, hồ sơ, thiết bị, Face AI, quản trị nhân sự và Presence QR chạy Node.js 22 sau Phase 7
 - Firebase App Check: reCAPTCHA Enterprise đã bật enforcement cho toàn bộ callable Functions production
 - Thiết bị mới phải được quản trị viên duyệt trước khi GPS/check-in được thực hiện
 - Quản trị viên có bảng điều khiển trong PWA để lọc, duyệt, khóa và mở khóa thiết bị
+- Quản trị viên có thể tạo/cập nhật nhân viên, cấp mật khẩu tạm một lần, phân ca và reset Face enrollment trong đúng phạm vi công ty; tài khoản mới bị chặn khỏi nghiệp vụ cho tới khi đổi mật khẩu thành công
 - QR hiện diện được ký bằng khóa trong Secret Manager, hết hạn sau 45 giây; proof của nhân viên chỉ dùng một lần
+- Face embedding được tạo trong trình duyệt; raw image/video không được upload. Template được mã hóa AES-256-GCM bằng khóa Secret Manager; Face proof và Presence proof đều do server phát, chỉ dùng một lần và được tiêu thụ nguyên tử cùng check-in
+- Head-turn ngẫu nhiên hiện là active challenge MVP, chưa phải liveness/PAD được chứng nhận; không dùng Face làm bằng chứng duy nhất cho tình huống rủi ro cao
 - Vercel production chạy `NEXT_PUBLIC_FIREBASE_DEMO_MODE=false`; local vẫn có thể chọn demo hoặc emulator
 
 ## Chạy ứng dụng
@@ -79,8 +82,10 @@ npm run firebase:deploy:functions
 - [App Check và thiết bị tin cậy](docs/phase-4-security-device.md)
 - [Bảng quản trị thiết bị](docs/phase-5-admin-device.md)
 - [Presence QR động](docs/phase-6-presence-qr.md)
+- [Face AI và quản trị nhân sự](docs/phase-7-face-workforce.md)
 
 ## Lưu ý về Face ID và Wi-Fi
 
 - PWA không truy cập dữ liệu sinh trắc Face ID của Apple. Passkey/WebAuthn và Face AI camera là hai lớp riêng.
+- Face AI chỉ gửi embedding, nhưng embedding vẫn là dữ liệu sinh trắc nhạy cảm và phải tuân theo consent, quyền reset/xóa, giới hạn truy cập và retention policy trong tài liệu Phase 7.
 - Trình duyệt không cho PWA đọc SSID/BSSID Wi-Fi. Dữ liệu `allowedWifiSsids` chỉ là cấu hình quản trị; bằng chứng hiện diện thật phải đến từ Presence Gateway trong mạng nội bộ, QR động có chữ ký, hoặc native wrapper/MDM.

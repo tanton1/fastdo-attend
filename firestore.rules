@@ -88,6 +88,29 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // Biometric templates, short-lived face challenges/proofs, and workforce
+    // uniqueness locks are server-only. Callable Functions return only the
+    // minimum derived result; clients can never read descriptors or proofs.
+    match /faceProfiles/{userId} {
+      allow read, write: if false;
+    }
+
+    match /faceSessions/{sessionId} {
+      allow read, write: if false;
+    }
+
+    match /faceProofs/{proofId} {
+      allow read, write: if false;
+    }
+
+    match /employeeCodes/{lockId} {
+      allow read, write: if false;
+    }
+
+    match /employeeEmails/{lockId} {
+      allow read, write: if false;
+    }
+
     match /attendanceRequests/{requestId} {
       allow read: if ownsRecord(resource.data) || (isManager() && belongsToCompany(resource.data));
       allow create: if isActiveEmployee()

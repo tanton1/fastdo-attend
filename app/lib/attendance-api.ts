@@ -1,7 +1,7 @@
 import { browserLocalPersistence, browserSessionPersistence, sendPasswordResetEmail, setPersistence, signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { httpsCallable } from "firebase/functions";
 import { firebaseDemoMode, getFirebaseServices } from "./firebase-client";
-import type { AdminDevice, AttendanceUser, CheckInResult, CheckOutResult, DeviceLocation, DeviceReviewResult, DeviceStatus, LocationHeartbeatResult, PrecheckData, PresenceChallenge, PresenceProof } from "./attendance-types";
+import type { AdminDevice, AdminWorkforce, AttendanceUser, CheckInResult, CheckOutResult, CreateEmployeeInput, CreateEmployeeResult, DeviceLocation, DeviceReviewResult, DeviceStatus, EmployeeRole, FaceChallenge, FaceCompletion, FaceEvidence, FacePurpose, FaceSession, LocationHeartbeatResult, PrecheckData, PresenceChallenge, PresenceProof, WorkforceAssignment, WorkforceEmployee } from "./attendance-types";
 
 const demoUser: AttendanceUser = {
   uid: "demo_hai_au",
@@ -11,6 +11,7 @@ const demoUser: AttendanceUser = {
   role: "COMPANY_ADMIN",
   companyId: "fastdo_demo",
   canManageDevices: true,
+  mustChangePassword: false,
   isDemo: true,
 };
 
@@ -33,7 +34,7 @@ const demoDevices: AdminDevice[] = [
 
 const demoPrecheck: PrecheckData = {
   serverTime: new Date().toISOString(),
-  employee: { id: demoUser.uid, name: demoUser.fullName, employeeCode: demoUser.employeeCode },
+  employee: { id: demoUser.uid, name: demoUser.fullName, employeeCode: demoUser.employeeCode, faceEnrollmentStatus: "NOT_STARTED" },
   branch: {
     id: "aura_thanh_khe",
     name: "Aura Thanh Khê",
@@ -45,6 +46,34 @@ const demoPrecheck: PrecheckData = {
   shift: { id: "shift_office", name: "Ca hành chính", startTime: "08:00", endTime: "17:00" },
   device: { id: "demo-device", label: "Thiết bị mô phỏng", platform: "web", status: "TRUSTED", trusted: true, isBlocked: false },
   requirements: { trustedDevice: true, location: true, faceVerification: false, liveness: false, presenceProof: false },
+};
+
+const demoWorkforce: AdminWorkforce = {
+  employees: [
+    {
+      id: demoUser.uid,
+      fullName: demoUser.fullName,
+      employeeCode: demoUser.employeeCode,
+      email: demoUser.email,
+      role: demoUser.role,
+      status: "ACTIVE",
+      branchIds: [demoPrecheck.branch.id],
+      faceEnrollmentStatus: "NOT_STARTED",
+    },
+    {
+      id: "demo_minh_anh",
+      fullName: "Minh Anh",
+      employeeCode: "FD0241",
+      email: "fd0241@fastdo.attend",
+      role: "EMPLOYEE",
+      status: "ACTIVE",
+      branchIds: [demoPrecheck.branch.id],
+      faceEnrollmentStatus: "APPROVED",
+    },
+  ],
+  branches: [{ id: demoPrecheck.branch.id, name: demoPrecheck.branch.name, address: demoPrecheck.branch.address, isActive: true }],
+  shifts: [{ id: demoPrecheck.shift.id, branchId: demoPrecheck.branch.id, name: demoPrecheck.shift.name, startTime: demoPrecheck.shift.startTime, endTime: demoPrecheck.shift.endTime, isActive: true }],
+  assignments: [],
 };
 
 function employeeEmail(identifier: string): string {
@@ -180,6 +209,17 @@ export async function requestPasswordReset(identifier: string): Promise<string> 
   }
 }
 
+export async function changeTemporaryPassword(newPassword: string): Promise<AttendanceUser> {
+  if (firebaseDemoMode()) return { ...demoUser, mustChangePassword: false };
+  const callable = httpsCallable<{ newPassword: string }, { changed: boolean }>(getFirebaseServices().functions, "changeTemporaryPassword");
+  try {
+    await callable({ newPassword });
+    return { ...(await loadMyProfile()), mustChangePassword: false };
+  } catch (reason) {
+    throw new Error(firebaseErrorMessage(reason, "Không thể đổi mật khẩu tạm thời."));
+  }
+}
+
 export async function logoutEmployee(user: AttendanceUser | null): Promise<void> {
   if (!user || user.isDemo) return;
   await signOut(getFirebaseServices().auth);
@@ -203,6 +243,153 @@ export async function getPrecheck(): Promise<PrecheckData> {
     return (await callable({ deviceId })).data;
   } catch (reason) {
     throw new Error(firebaseErrorMessage(reason, "Không thể tải ca làm và điều kiện chấm công."));
+  }
+}
+
+export async function startFaceSession(purpose: FacePurpose): Promise<FaceSession> {
+  const deviceId = getOrCreateDeviceId();
+  if (firebaseDemoMode()) {
+    await wait(300);
+    const challenge: FaceChallenge = Math.random() > 0.5 ? "TURN_LEFT" : "TURN_RIGHT";
+    return {
+      sessionId: `demo_face_${crypto.randomUUID()}`,
+      purpose,
+      challenge,
+      expiresAt: new Date(Date.now() + 120_000).toISOString(),
+      enrollmentStatus: demoPrecheck.employee.faceEnrollmentStatus,
+    };
+  }
+  const callable = httpsCallable<{ deviceId: string; purpose: FacePurpose }, FaceSession>(getFirebaseServices().functions, "startFaceSession");
+  try {
+    return (await callable({ deviceId, purpose })).data;
+  } catch (reason) {
+    throw new Error(firebaseErrorMessage(reason, "Không thể bắt đầu phiên xác thực khuôn mặt."));
+  }
+}
+
+export async function completeFaceSession(input: {
+  sessionId: string;
+  descriptor: number[];
+  evidence: FaceEvidence;
+}): Promise<FaceCompletion> {
+  if (input.descriptor.length !== 128 || input.descriptor.some((value) => !Number.isFinite(value))) {
+    throw new Error("Mẫu khuôn mặt chưa hợp lệ. Vui lòng quét lại trong điều kiện đủ sáng.");
+  }
+  if (firebaseDemoMode()) {
+    await wait(500);
+    const enrolled = demoPrecheck.employee.faceEnrollmentStatus !== "APPROVED";
+    demoPrecheck.employee.faceEnrollmentStatus = "APPROVED";
+    return {
+      faceProofId: `demo_face_proof_${crypto.randomUUID()}`,
+      matchScore: enrolled ? 1 : 0.94,
+      enrolled,
+      enrollmentStatus: "APPROVED",
+      expiresAt: new Date(Date.now() + 90_000).toISOString(),
+    };
+  }
+  const callable = httpsCallable<{
+    sessionId: string;
+    deviceId: string;
+    descriptor: number[];
+    evidence: FaceEvidence;
+    consentVersion: "biometric-consent-v1";
+  }, FaceCompletion>(getFirebaseServices().functions, "completeFaceSession");
+  try {
+    return (await callable({
+      sessionId: input.sessionId,
+      deviceId: getOrCreateDeviceId(),
+      descriptor: input.descriptor,
+      evidence: input.evidence,
+      consentVersion: "biometric-consent-v1",
+    })).data;
+  } catch (reason) {
+    throw new Error(firebaseErrorMessage(reason, "Không thể hoàn tất xác thực khuôn mặt."));
+  }
+}
+
+export async function getAdminWorkforce(): Promise<AdminWorkforce> {
+  if (firebaseDemoMode()) {
+    await wait(350);
+    return {
+      employees: demoWorkforce.employees.map((item) => ({ ...item, branchIds: [...item.branchIds] })),
+      branches: demoWorkforce.branches.map((item) => ({ ...item })),
+      shifts: demoWorkforce.shifts.map((item) => ({ ...item })),
+      assignments: demoWorkforce.assignments.map((item) => ({ ...item })),
+    };
+  }
+  const callable = httpsCallable<undefined, AdminWorkforce>(getFirebaseServices().functions, "getAdminWorkforce");
+  try {
+    return (await callable()).data;
+  } catch (reason) {
+    throw new Error(firebaseErrorMessage(reason, "Không thể tải dữ liệu nhân sự và ca làm."));
+  }
+}
+
+export async function createEmployee(input: CreateEmployeeInput): Promise<CreateEmployeeResult> {
+  if (firebaseDemoMode()) {
+    await wait(450);
+    const employee: WorkforceEmployee = {
+      id: `demo_${crypto.randomUUID()}`,
+      ...input,
+      status: "ACTIVE",
+      faceEnrollmentStatus: "NOT_STARTED",
+    };
+    demoWorkforce.employees.unshift(employee);
+    return { employee, temporaryPassword: `Fd@${Math.floor(100000 + Math.random() * 900000)}` };
+  }
+  const callable = httpsCallable<CreateEmployeeInput, CreateEmployeeResult>(getFirebaseServices().functions, "createEmployee");
+  try {
+    return (await callable(input)).data;
+  } catch (reason) {
+    throw new Error(firebaseErrorMessage(reason, "Không thể tạo tài khoản nhân viên."));
+  }
+}
+
+export async function updateEmployee(employeeId: string, updates: { status?: "ACTIVE" | "INACTIVE"; role?: EmployeeRole }): Promise<WorkforceEmployee> {
+  if (firebaseDemoMode()) {
+    await wait(300);
+    const index = demoWorkforce.employees.findIndex((item) => item.id === employeeId);
+    if (index < 0) throw new Error("Không tìm thấy nhân viên.");
+    demoWorkforce.employees[index] = { ...demoWorkforce.employees[index], ...updates };
+    return { ...demoWorkforce.employees[index] };
+  }
+  const callable = httpsCallable<{ employeeId: string; status?: "ACTIVE" | "INACTIVE"; role?: EmployeeRole }, { employee: WorkforceEmployee }>(getFirebaseServices().functions, "updateEmployee");
+  try {
+    return (await callable({ employeeId, ...updates })).data.employee;
+  } catch (reason) {
+    throw new Error(firebaseErrorMessage(reason, "Không thể cập nhật nhân viên."));
+  }
+}
+
+export async function assignEmployeeShift(input: { userId: string; shiftId: string; branchId: string; startDate: string; endDate: string }): Promise<WorkforceAssignment> {
+  if (firebaseDemoMode()) {
+    await wait(350);
+    const assignment: WorkforceAssignment = { id: `demo_assignment_${crypto.randomUUID()}`, ...input };
+    demoWorkforce.assignments.unshift(assignment);
+    return assignment;
+  }
+  const callable = httpsCallable<{ employeeId: string; shiftId: string; branchId: string; startDate: string; endDate: string }, { assignment: WorkforceAssignment }>(getFirebaseServices().functions, "assignEmployeeShift");
+  try {
+    return (await callable({ employeeId: input.userId, shiftId: input.shiftId, branchId: input.branchId, startDate: input.startDate, endDate: input.endDate })).data.assignment;
+  } catch (reason) {
+    throw new Error(firebaseErrorMessage(reason, "Không thể phân ca cho nhân viên."));
+  }
+}
+
+export async function resetEmployeeFace(employeeId: string): Promise<{ employeeId: string; faceEnrollmentStatus: "NOT_STARTED" }> {
+  if (firebaseDemoMode()) {
+    await wait(300);
+    const employee = demoWorkforce.employees.find((item) => item.id === employeeId);
+    if (employee) employee.faceEnrollmentStatus = "NOT_STARTED";
+    if (employeeId === demoUser.uid) demoPrecheck.employee.faceEnrollmentStatus = "NOT_STARTED";
+    return { employeeId, faceEnrollmentStatus: "NOT_STARTED" };
+  }
+  const callable = httpsCallable<{ employeeId: string }, { userId: string; faceEnrollmentStatus: "NOT_STARTED" }>(getFirebaseServices().functions, "resetEmployeeFace");
+  try {
+    const result = (await callable({ employeeId })).data;
+    return { employeeId: result.userId, faceEnrollmentStatus: result.faceEnrollmentStatus };
+  } catch (reason) {
+    throw new Error(firebaseErrorMessage(reason, "Không thể đặt lại hồ sơ khuôn mặt."));
   }
 }
 
@@ -250,7 +437,7 @@ export async function readCurrentLocation(fallbackToDemo = false): Promise<Devic
   });
 }
 
-export async function submitCheckIn(location: DeviceLocation, presenceToken: string): Promise<CheckInResult> {
+export async function submitCheckIn(location: DeviceLocation, presenceToken: string, faceProofId: string): Promise<CheckInResult> {
   if (firebaseDemoMode()) {
     await wait(800);
     return {
@@ -270,6 +457,8 @@ export async function submitCheckIn(location: DeviceLocation, presenceToken: str
     deviceId: getOrCreateDeviceId(),
     location,
     presenceToken,
+    faceProofId,
+    faceSessionId: faceProofId,
     clientTimestamp: new Date().toISOString(),
   });
   return response.data as CheckInResult;

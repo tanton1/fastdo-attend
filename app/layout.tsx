@@ -16,13 +16,13 @@ export const metadata: Metadata = {
     locale: "vi_VN",
     title: "FASTDO ATTEND",
     description: "Chấm công đa lớp bằng khuôn mặt, vị trí và xác minh hiện diện tại cơ sở.",
-    images: [{ url: "/og.png", width: 1672, height: 941, alt: "FASTDO ATTEND — Chấm công đa lớp" }],
+    images: [{ url: "/og-phase7.png", width: 1731, height: 909, alt: "FASTDO ATTEND — Face AI, nhân sự và ca làm" }],
   },
   twitter: {
     card: "summary_large_image",
     title: "FASTDO ATTEND",
     description: "Chấm công đa lớp bằng khuôn mặt, vị trí và xác minh hiện diện tại cơ sở.",
-    images: ["/og.png"],
+    images: ["/og-phase7.png"],
   },
 };
 

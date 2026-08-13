@@ -24,7 +24,7 @@ export function requireUserId(request: CallableRequest<unknown>): string {
   return request.auth.uid;
 }
 
-export async function loadEmployeeContext(userId: string): Promise<EmployeeContext> {
+export async function loadEmployeeContext(userId: string, allowTemporaryPassword = false): Promise<EmployeeContext> {
   const db = getFirestore();
   const employeeSnapshot = await db.doc(`employees/${userId}`).get();
   if (!employeeSnapshot.exists) {
@@ -34,6 +34,9 @@ export async function loadEmployeeContext(userId: string): Promise<EmployeeConte
   const employee = employeeSnapshot.data() as EmployeeDocument;
   if (employee.status !== "ACTIVE") {
     throw new HttpsError("permission-denied", "Tài khoản nhân viên không hoạt động.");
+  }
+  if (employee.mustChangePassword && !allowTemporaryPassword) {
+    throw new HttpsError("failed-precondition", "Bạn phải đổi mật khẩu tạm thời trước khi sử dụng ứng dụng.");
   }
 
   return { userId, employee };

@@ -19,6 +19,7 @@
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
+    "@vladmandic/face-api": "1.7.15",
     "drizzle-orm": "0.45.2",
     "firebase": "^12.3.0",
     "next": "16.3.0",

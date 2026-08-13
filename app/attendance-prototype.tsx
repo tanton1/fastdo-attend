@@ -4,10 +4,10 @@ import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import QRCode from "qrcode";
 import { firebaseDemoMode } from "./lib/firebase-client";
-import { createPresenceChallenge, getPrecheck, listManagedDevices, loginEmployee, logoutEmployee, readCurrentLocation, requestPasswordReset, restoreAuthenticatedUser, reviewManagedDevice, sendLocationHeartbeat, submitCheckIn, submitCheckOut, verifyPresenceChallenge } from "./lib/attendance-api";
-import type { AdminDevice, AttendanceUser, CheckInResult, DeviceLocation, DeviceStatus, LocationHeartbeatResult, PrecheckData, PresenceChallenge } from "./lib/attendance-types";
+import { assignEmployeeShift, changeTemporaryPassword, completeFaceSession, createEmployee, createPresenceChallenge, getAdminWorkforce, getPrecheck, listManagedDevices, loginEmployee, logoutEmployee, readCurrentLocation, requestPasswordReset, resetEmployeeFace, restoreAuthenticatedUser, reviewManagedDevice, sendLocationHeartbeat, startFaceSession, submitCheckIn, submitCheckOut, updateEmployee, verifyPresenceChallenge } from "./lib/attendance-api";
+import type { AdminDevice, AdminWorkforce, AttendanceUser, CheckInResult, DeviceLocation, DeviceStatus, FaceChallenge, FaceEvidence, FacePurpose, LocationHeartbeatResult, PrecheckData, PresenceChallenge, WorkforceEmployee } from "./lib/attendance-types";
 
-type Screen = "login" | "home" | "devices" | "precheck" | "face" | "presence" | "success" | "session";
+type Screen = "login" | "password" | "home" | "devices" | "precheck" | "face" | "presence" | "success" | "session";
 type CheckState = "waiting" | "checking" | "success" | "warning";
 
 interface BarcodeDetectorLike {
@@ -169,6 +169,61 @@ function LoginScreen({ onLogin }: { onLogin: (employeeId: string, password: stri
   );
 }
 
+function ChangeTemporaryPasswordScreen({ user, onChanged, onLogout }: { user: AttendanceUser; onChanged: (user: AttendanceUser) => void; onLogout: () => void }) {
+  const [password, setPassword] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const rules = {
+    length: password.length >= 12,
+    upper: /[A-Z]/.test(password),
+    lower: /[a-z]/.test(password),
+    digit: /\d/.test(password),
+    symbol: /[^A-Za-z0-9]/.test(password),
+  };
+  const valid = Object.values(rules).every(Boolean) && password === confirmation;
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!valid) {
+      setError(password !== confirmation ? "Hai mật khẩu chưa trùng khớp." : "Mật khẩu mới chưa đáp ứng đủ yêu cầu bảo mật.");
+      return;
+    }
+    setSubmitting(true);
+    setError("");
+    try {
+      onChanged(await changeTemporaryPassword(password));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Không thể đổi mật khẩu.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <section className="screen forced-password-screen" aria-labelledby="forced-password-title">
+      <div className="forced-password-glow" />
+      <header><Brand compact /><button onClick={onLogout}>Đăng xuất</button></header>
+      <main>
+        <span className="forced-password-icon">⌘</span>
+        <p className="eyebrow">BẢO VỆ TÀI KHOẢN</p>
+        <h1 id="forced-password-title">Tạo mật khẩu riêng</h1>
+        <p>Chào {user.fullName}. Mật khẩu hiện tại chỉ dùng một lần; bạn cần thay đổi trước khi truy cập dữ liệu chấm công.</p>
+        <form onSubmit={submit}>
+          <label><span>Mật khẩu mới</span><span className="password-field"><input type={showPassword ? "text" : "password"} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password" /><button type="button" onClick={() => setShowPassword((value) => !value)}>{showPassword ? "Ẩn" : "Hiện"}</button></span></label>
+          <label><span>Nhập lại mật khẩu</span><input type={showPassword ? "text" : "password"} value={confirmation} onChange={(event) => setConfirmation(event.target.value)} autoComplete="new-password" /></label>
+          <ul className="password-rules" aria-label="Yêu cầu mật khẩu"><li className={rules.length ? "done" : ""}>Ít nhất 12 ký tự</li><li className={rules.upper && rules.lower ? "done" : ""}>Có chữ hoa và chữ thường</li><li className={rules.digit ? "done" : ""}>Có chữ số</li><li className={rules.symbol ? "done" : ""}>Có ký tự đặc biệt</li></ul>
+          {confirmation && password !== confirmation && <p className="form-error">Hai mật khẩu chưa trùng khớp.</p>}
+          {error && <p className="form-error" role="alert">{error}</p>}
+          <button className="primary-button" type="submit" disabled={!valid || submitting}>{submitting ? "Đang bảo vệ tài khoản…" : "Đổi mật khẩu & tiếp tục"}</button>
+        </form>
+        <small>FASTDO không bao giờ gửi mật khẩu mới của bạn qua email hoặc tin nhắn.</small>
+      </main>
+    </section>
+  );
+}
+
 function HomeScreen({ time, date, user, precheck, onCheckIn, onManageDevices, onLogout }: { time: string; date: string; user: AttendanceUser; precheck: PrecheckData | null; onCheckIn: () => void; onManageDevices: () => void; onLogout: () => void }) {
   return (
     <section className="screen home-screen" aria-labelledby="home-title">
@@ -307,8 +362,204 @@ function PresenceAdminPanel() {
   );
 }
 
+function faceStatusLabel(status: WorkforceEmployee["faceEnrollmentStatus"]): string {
+  if (status === "APPROVED") return "Đã đăng ký";
+  if (status === "PENDING") return "Đang xử lý";
+  if (status === "REJECTED") return "Cần đăng ký lại";
+  return "Chưa đăng ký";
+}
+
+function WorkforceAdminPanel({ mode }: { mode: "EMPLOYEES" | "SHIFTS" }) {
+  const [data, setData] = useState<AdminWorkforce | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busyId, setBusyId] = useState("");
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [showCreate, setShowCreate] = useState(false);
+  const [temporaryPassword, setTemporaryPassword] = useState<{ employee: string; value: string } | null>(null);
+  const [employeeForm, setEmployeeForm] = useState({ fullName: "", employeeCode: "", email: "", role: "EMPLOYEE" as WorkforceEmployee["role"], branchId: "" });
+  const today = new Date().toISOString().slice(0, 10);
+  const [assignmentForm, setAssignmentForm] = useState({ userId: "", branchId: "", shiftId: "", startDate: today, endDate: today });
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const result = await getAdminWorkforce();
+      setData(result);
+      setEmployeeForm((current) => ({ ...current, branchId: current.branchId || result.branches[0]?.id || "" }));
+      setAssignmentForm((current) => ({
+        ...current,
+        userId: current.userId || result.employees.find((employee) => employee.status === "ACTIVE")?.id || "",
+        branchId: current.branchId || result.branches[0]?.id || "",
+        shiftId: current.shiftId || result.shifts[0]?.id || "",
+      }));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Không thể tải dữ liệu nhân sự.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    void getAdminWorkforce()
+      .then((result) => {
+        if (!active) return;
+        setData(result);
+        setEmployeeForm((current) => ({ ...current, branchId: current.branchId || result.branches[0]?.id || "" }));
+        setAssignmentForm((current) => ({
+          ...current,
+          userId: current.userId || result.employees.find((employee) => employee.status === "ACTIVE")?.id || "",
+          branchId: current.branchId || result.branches[0]?.id || "",
+          shiftId: current.shiftId || result.shifts[0]?.id || "",
+        }));
+      })
+      .catch((reason) => { if (active) setError(reason instanceof Error ? reason.message : "Không thể tải dữ liệu nhân sự."); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, []);
+
+  async function submitEmployee(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!employeeForm.fullName.trim() || !employeeForm.employeeCode.trim() || !employeeForm.email.trim() || !employeeForm.branchId) {
+      setError("Vui lòng nhập đầy đủ thông tin nhân viên và chi nhánh.");
+      return;
+    }
+    setBusyId("CREATE");
+    setError("");
+    setNotice("");
+    try {
+      const result = await createEmployee({
+        fullName: employeeForm.fullName.trim(),
+        employeeCode: employeeForm.employeeCode.trim().toUpperCase(),
+        email: employeeForm.email.trim().toLowerCase(),
+        role: employeeForm.role,
+        branchIds: [employeeForm.branchId],
+      });
+      setData((current) => current ? { ...current, employees: [result.employee, ...current.employees] } : current);
+      setTemporaryPassword({ employee: result.employee.fullName, value: result.temporaryPassword });
+      setEmployeeForm((current) => ({ ...current, fullName: "", employeeCode: "", email: "", role: "EMPLOYEE" }));
+      setShowCreate(false);
+      setNotice(`Đã tạo tài khoản cho ${result.employee.fullName}.`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Không thể tạo nhân viên.");
+    } finally {
+      setBusyId("");
+    }
+  }
+
+  async function toggleEmployee(employee: WorkforceEmployee) {
+    const nextStatus = employee.status === "ACTIVE" ? "INACTIVE" : "ACTIVE";
+    if (nextStatus === "INACTIVE" && !window.confirm(`Tạm ngưng tài khoản ${employee.fullName}?`)) return;
+    setBusyId(employee.id);
+    setError("");
+    try {
+      const updated = await updateEmployee(employee.id, { status: nextStatus });
+      setData((current) => current ? { ...current, employees: current.employees.map((item) => item.id === employee.id ? updated : item) } : current);
+      setNotice(nextStatus === "ACTIVE" ? `Đã kích hoạt ${employee.fullName}.` : `Đã tạm ngưng ${employee.fullName}.`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Không thể cập nhật nhân viên.");
+    } finally {
+      setBusyId("");
+    }
+  }
+
+  async function resetFace(employee: WorkforceEmployee) {
+    if (!window.confirm(`Xóa mẫu khuôn mặt hiện tại của ${employee.fullName} và yêu cầu đăng ký lại?`)) return;
+    setBusyId(employee.id);
+    setError("");
+    try {
+      await resetEmployeeFace(employee.id);
+      setData((current) => current ? { ...current, employees: current.employees.map((item) => item.id === employee.id ? { ...item, faceEnrollmentStatus: "NOT_STARTED" } : item) } : current);
+      setNotice(`Đã yêu cầu ${employee.fullName} đăng ký lại khuôn mặt.`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Không thể đặt lại mẫu khuôn mặt.");
+    } finally {
+      setBusyId("");
+    }
+  }
+
+  async function submitAssignment(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!assignmentForm.userId || !assignmentForm.branchId || !assignmentForm.shiftId || !assignmentForm.startDate || !assignmentForm.endDate) {
+      setError("Vui lòng chọn đủ nhân viên, chi nhánh, ca và thời hạn áp dụng.");
+      return;
+    }
+    if (assignmentForm.endDate < assignmentForm.startDate) {
+      setError("Ngày kết thúc phải bằng hoặc sau ngày bắt đầu.");
+      return;
+    }
+    setBusyId("ASSIGN");
+    setError("");
+    try {
+      const assignment = await assignEmployeeShift(assignmentForm);
+      setData((current) => current ? { ...current, assignments: [assignment, ...current.assignments] } : current);
+      setNotice("Đã phân ca và đồng bộ lịch chấm công.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Không thể phân ca.");
+    } finally {
+      setBusyId("");
+    }
+  }
+
+  if (loading) return <div className="workforce-loading"><span className="status-spinner" /> Đang đồng bộ dữ liệu…</div>;
+  if (!data) return <div className="device-empty"><strong>Chưa tải được dữ liệu</strong><button className="secondary-button" onClick={() => void load()}>Thử lại</button></div>;
+
+  if (mode === "SHIFTS") {
+    const availableShifts = data.shifts.filter((shift) => !assignmentForm.branchId || shift.branchId === assignmentForm.branchId);
+    return (
+      <section className="workforce-panel" aria-label="Quản lý phân ca">
+        <div className="workforce-heading"><div><small>LỊCH LÀM VIỆC</small><h2>Phân ca nhân viên</h2></div><span>{data.assignments.length} phân công</span></div>
+        <form className="workforce-form assignment-form" onSubmit={submitAssignment}>
+          <label><span>Nhân viên</span><select value={assignmentForm.userId} onChange={(event) => setAssignmentForm((current) => ({ ...current, userId: event.target.value }))}>{data.employees.filter((employee) => employee.status === "ACTIVE").map((employee) => <option key={employee.id} value={employee.id}>{employee.employeeCode} · {employee.fullName}</option>)}</select></label>
+          <label><span>Chi nhánh</span><select value={assignmentForm.branchId} onChange={(event) => { const branchId = event.target.value; const firstShift = data.shifts.find((shift) => shift.branchId === branchId); setAssignmentForm((current) => ({ ...current, branchId, shiftId: firstShift?.id || "" })); }}>{data.branches.filter((branch) => branch.isActive).map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}</select></label>
+          <label><span>Ca làm</span><select value={assignmentForm.shiftId} onChange={(event) => setAssignmentForm((current) => ({ ...current, shiftId: event.target.value }))}>{availableShifts.map((shift) => <option key={shift.id} value={shift.id}>{shift.name} · {shift.startTime}–{shift.endTime}</option>)}</select></label>
+          <div className="workforce-form__dates"><label><span>Từ ngày</span><input type="date" value={assignmentForm.startDate} onChange={(event) => setAssignmentForm((current) => ({ ...current, startDate: event.target.value }))} /></label><label><span>Đến ngày</span><input type="date" value={assignmentForm.endDate} min={assignmentForm.startDate} onChange={(event) => setAssignmentForm((current) => ({ ...current, endDate: event.target.value }))} /></label></div>
+          <button className="primary-button" type="submit" disabled={busyId === "ASSIGN" || availableShifts.length === 0}>{busyId === "ASSIGN" ? "Đang phân ca…" : "Xác nhận phân ca"}</button>
+        </form>
+        {error && <p className="admin-message admin-message--error" role="alert">{error}</p>}
+        {notice && <p className="admin-message admin-message--success" role="status">{notice}</p>}
+        <div className="assignment-list">
+          {data.assignments.length === 0 && <div className="device-empty"><span>◷</span><strong>Chưa có phân ca</strong><p>Tạo lịch đầu tiên bằng biểu mẫu phía trên.</p></div>}
+          {data.assignments.map((assignment) => {
+            const employee = data.employees.find((item) => item.id === assignment.userId);
+            const shift = data.shifts.find((item) => item.id === assignment.shiftId);
+            const branch = data.branches.find((item) => item.id === assignment.branchId);
+            return <article className="assignment-card" key={assignment.id}><span>◷</span><div><strong>{employee?.fullName ?? "Nhân viên"}</strong><p>{shift?.name ?? "Ca làm"} · {branch?.name ?? "Chi nhánh"}</p><small>{assignment.startDate} → {assignment.endDate}</small></div></article>;
+          })}
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="workforce-panel" aria-label="Quản lý nhân viên">
+      <div className="workforce-heading"><div><small>NHÂN SỰ DOANH NGHIỆP</small><h2>{data.employees.length} nhân viên</h2></div><button onClick={() => setShowCreate((value) => !value)}>{showCreate ? "Đóng" : "+ Thêm mới"}</button></div>
+      {showCreate && <form className="workforce-form" onSubmit={submitEmployee}>
+        <label><span>Họ và tên</span><input value={employeeForm.fullName} onChange={(event) => setEmployeeForm((current) => ({ ...current, fullName: event.target.value }))} placeholder="Nguyễn Minh Anh" autoComplete="name" /></label>
+        <div className="workforce-form__split"><label><span>Mã nhân viên</span><input value={employeeForm.employeeCode} onChange={(event) => setEmployeeForm((current) => ({ ...current, employeeCode: event.target.value }))} placeholder="FD0242" /></label><label><span>Vai trò</span><select value={employeeForm.role} onChange={(event) => setEmployeeForm((current) => ({ ...current, role: event.target.value as WorkforceEmployee["role"] }))}><option value="EMPLOYEE">Nhân viên</option><option value="MANAGER">Quản lý</option><option value="HR">Nhân sự</option></select></label></div>
+        <label><span>Email đăng nhập</span><input type="email" value={employeeForm.email} onChange={(event) => setEmployeeForm((current) => ({ ...current, email: event.target.value }))} placeholder="minhanh@congty.vn" autoComplete="email" /></label>
+        <label><span>Chi nhánh</span><select value={employeeForm.branchId} onChange={(event) => setEmployeeForm((current) => ({ ...current, branchId: event.target.value }))}>{data.branches.filter((branch) => branch.isActive).map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}</select></label>
+        <button className="primary-button" type="submit" disabled={busyId === "CREATE"}>{busyId === "CREATE" ? "Đang tạo tài khoản…" : "Tạo nhân viên"}</button>
+      </form>}
+      {temporaryPassword && <div className="temporary-password" role="status"><div><span>MẬT KHẨU TẠM THỜI · CHỈ HIỆN MỘT LẦN</span><strong>{temporaryPassword.value}</strong><p>Gửi riêng cho {temporaryPassword.employee} và yêu cầu đổi ngay sau lần đăng nhập đầu tiên.</p></div><button onClick={() => void navigator.clipboard.writeText(temporaryPassword.value)}>Sao chép</button></div>}
+      {error && <p className="admin-message admin-message--error" role="alert">{error}</p>}
+      {notice && <p className="admin-message admin-message--success" role="status">{notice}</p>}
+      <div className="employee-list">
+        {data.employees.map((employee) => <article className={`employee-card ${employee.status === "INACTIVE" ? "is-inactive" : ""}`} key={employee.id}>
+          <div className="employee-card__head"><span className="device-owner-avatar">{employee.fullName.trim().split(/\s+/).slice(-2).map((part) => part[0]).join("").toUpperCase()}</span><div><strong>{employee.fullName}</strong><small>{employee.employeeCode} · {employee.role.replaceAll("_", " ")}</small></div><b>{employee.status === "ACTIVE" ? "HOẠT ĐỘNG" : "TẠM NGƯNG"}</b></div>
+          <p className="employee-card__email">{employee.email}</p>
+          <div className="employee-face"><span className={`face-state face-state--${employee.faceEnrollmentStatus.toLowerCase()}`}>◉ {faceStatusLabel(employee.faceEnrollmentStatus)}</span>{employee.faceEnrollmentStatus !== "NOT_STARTED" && <button onClick={() => void resetFace(employee)} disabled={busyId === employee.id}>Đặt lại Face</button>}</div>
+          <button className={`employee-toggle ${employee.status === "ACTIVE" ? "employee-toggle--stop" : ""}`} onClick={() => void toggleEmployee(employee)} disabled={busyId === employee.id}>{busyId === employee.id ? "Đang cập nhật…" : employee.status === "ACTIVE" ? "Tạm ngưng tài khoản" : "Kích hoạt tài khoản"}</button>
+        </article>)}
+      </div>
+    </section>
+  );
+}
+
 function DeviceAdminScreen({ user, onBack }: { user: AttendanceUser; onBack: () => void }) {
-  const [section, setSection] = useState<"DEVICES" | "PRESENCE">("DEVICES");
+  const [section, setSection] = useState<"DEVICES" | "PRESENCE" | "EMPLOYEES" | "SHIFTS">("DEVICES");
   const [devices, setDevices] = useState<AdminDevice[]>([]);
   const [filter, setFilter] = useState<"ALL" | DeviceStatus>("ALL");
   const [loading, setLoading] = useState(true);
@@ -372,7 +623,7 @@ function DeviceAdminScreen({ user, onBack }: { user: AttendanceUser; onBack: () 
         <button className="back-button" onClick={onBack} aria-label="Quay lại">←</button>
         <div>
           <span>TRUNG TÂM QUẢN TRỊ</span>
-          <h1 id="device-admin-title">{section === "DEVICES" ? "Kiểm soát truy cập" : "Hiện diện tại cơ sở"}</h1>
+          <h1 id="device-admin-title">{section === "DEVICES" ? "Kiểm soát truy cập" : section === "PRESENCE" ? "Hiện diện tại cơ sở" : section === "EMPLOYEES" ? "Đội ngũ nhân viên" : "Ca làm & phân công"}</h1>
         </div>
         <button className="admin-refresh" onClick={() => section === "DEVICES" && void refresh()} disabled={section !== "DEVICES" || loading} aria-label="Tải lại danh sách">↻</button>
       </header>
@@ -387,9 +638,11 @@ function DeviceAdminScreen({ user, onBack }: { user: AttendanceUser; onBack: () 
         <nav className="admin-tabs" aria-label="Chức năng quản trị">
           <button className={section === "DEVICES" ? "active" : ""} onClick={() => setSection("DEVICES")}>▣ Thiết bị</button>
           <button className={section === "PRESENCE" ? "active" : ""} onClick={() => setSection("PRESENCE")}>▦ Presence QR</button>
+          <button className={section === "EMPLOYEES" ? "active" : ""} onClick={() => setSection("EMPLOYEES")}>♙ Nhân viên</button>
+          <button className={section === "SHIFTS" ? "active" : ""} onClick={() => setSection("SHIFTS")}>◷ Phân ca</button>
         </nav>
 
-        {section === "PRESENCE" ? <PresenceAdminPanel /> : <><div className="device-stats">
+        {section === "PRESENCE" ? <PresenceAdminPanel /> : section === "EMPLOYEES" || section === "SHIFTS" ? <WorkforceAdminPanel mode={section} /> : <><div className="device-stats">
           <button className={filter === "PENDING" ? "active" : ""} onClick={() => setFilter("PENDING")}><strong>{counts.PENDING}</strong><span>Chờ duyệt</span></button>
           <button className={filter === "TRUSTED" ? "active" : ""} onClick={() => setFilter("TRUSTED")}><strong>{counts.TRUSTED}</strong><span>Đã duyệt</span></button>
           <button className={filter === "BLOCKED" ? "active" : ""} onClick={() => setFilter("BLOCKED")}><strong>{counts.BLOCKED}</strong><span>Đã khóa</span></button>
@@ -535,103 +788,248 @@ function PrecheckScreen({ onBack, onContinue }: { onBack: () => void; onContinue
   );
 }
 
-function FaceScreen({ onBack, onComplete }: { onBack: () => void; onComplete: () => Promise<void> }) {
+let faceModelsPromise: Promise<typeof import("@vladmandic/face-api")> | null = null;
+
+function loadFaceModels(): Promise<typeof import("@vladmandic/face-api")> {
+  if (!faceModelsPromise) {
+    faceModelsPromise = import("@vladmandic/face-api").then(async (faceApi) => {
+      await Promise.all([
+        faceApi.nets.tinyFaceDetector.loadFromUri("/models/face-api"),
+        faceApi.nets.faceLandmark68TinyNet.loadFromUri("/models/face-api"),
+        faceApi.nets.faceRecognitionNet.loadFromUri("/models/face-api"),
+      ]);
+      return faceApi;
+    }).catch((reason) => {
+      faceModelsPromise = null;
+      throw reason;
+    });
+  }
+  return faceModelsPromise;
+}
+
+function averageFaceDescriptors(descriptors: Float32Array[]): number[] {
+  if (descriptors.length === 0) return [];
+  return Array.from({ length: 128 }, (_, index) => descriptors.reduce((sum, descriptor) => sum + descriptor[index], 0) / descriptors.length);
+}
+
+function FaceScreen({ precheck, onBack, onComplete }: { precheck: PrecheckData; onBack: () => void; onComplete: (faceProofId: string) => Promise<void> }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const cancelledRef = useRef(false);
+  const [purpose, setPurpose] = useState<FacePurpose>(precheck.employee.faceEnrollmentStatus === "APPROVED" ? "VERIFY" : "ENROLL");
   const [cameraState, setCameraState] = useState<"idle" | "loading" | "ready" | "denied">("idle");
-  const [scanState, setScanState] = useState<"idle" | "scanning" | "captured">("idle");
-  const [submitting, setSubmitting] = useState(false);
+  const [scanState, setScanState] = useState<"idle" | "neutral" | "challenge" | "submitting" | "enrolled" | "captured">("idle");
+  const [challenge, setChallenge] = useState<FaceChallenge | null>(null);
+  const [consented, setConsented] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [matchScore, setMatchScore] = useState<number | null>(null);
+  const [faceProofId, setFaceProofId] = useState("");
   const [error, setError] = useState("");
-  const [demoBypassed, setDemoBypassed] = useState(false);
   const demoMode = firebaseDemoMode();
 
-  useEffect(() => () => streamRef.current?.getTracks().forEach((track) => track.stop()), []);
+  useEffect(() => () => {
+    cancelledRef.current = true;
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+  }, []);
 
-  async function startCamera() {
-    setCameraState("loading");
-    setError("");
-    if (!navigator.mediaDevices?.getUserMedia) {
-      setCameraState("denied");
-      setError("Thiết bị hoặc trình duyệt này không hỗ trợ truy cập camera.");
+  function stopCamera() {
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+  }
+
+  async function prepareCamera() {
+    if (purpose === "ENROLL" && !consented) {
+      setError("Bạn cần xác nhận đồng ý đăng ký dữ liệu khuôn mặt trước khi tiếp tục.");
       return;
     }
-    const cameraRequest = navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false });
-    let timeoutId = 0;
-    try {
-      const timeout = new Promise<never>((_, reject) => {
-        timeoutId = window.setTimeout(() => reject(new Error("CAMERA_TIMEOUT")), 8000);
-      });
-      const stream = await Promise.race([cameraRequest, timeout]);
-      window.clearTimeout(timeoutId);
-      streamRef.current = stream;
-      if (videoRef.current) videoRef.current.srcObject = stream;
-      setCameraState("ready");
-    } catch (reason) {
-      window.clearTimeout(timeoutId);
-      void cameraRequest.then((lateStream) => lateStream.getTracks().forEach((track) => track.stop())).catch(() => undefined);
+    if (!navigator.mediaDevices?.getUserMedia) {
       setCameraState("denied");
-      setError(reason instanceof Error && reason.message === "CAMERA_TIMEOUT"
-        ? "Camera chưa được cấp quyền sau 8 giây. Hãy cấp quyền hoặc tiếp tục bằng bản mô phỏng."
-        : "Không thể mở camera. Hãy kiểm tra quyền camera của trình duyệt.");
+      setError("Thiết bị hoặc trình duyệt này không hỗ trợ camera.");
+      return;
     }
-  }
-
-  function continueDemo() {
-    setDemoBypassed(true);
+    setCameraState("loading");
     setError("");
-    setScanState("captured");
-  }
-
-  function startScan() {
-    if (cameraState !== "ready") return;
-    setScanState("scanning");
-    window.setTimeout(() => setScanState("captured"), 2200);
-  }
-
-  async function complete() {
-    setSubmitting(true);
-    setError("");
+    cancelledRef.current = false;
     try {
-      await onComplete();
+      const [, stream] = await Promise.all([
+        loadFaceModels(),
+        navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 640 } }, audio: false }),
+      ]);
+      if (cancelledRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
+      const session = await startFaceSession(purpose);
+      setChallenge(session.challenge);
+      setCameraState("ready");
+      setScanState("idle");
+      sessionStorage.setItem("fastdo-face-session", JSON.stringify({ id: session.sessionId, expiresAt: session.expiresAt }));
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Không thể gửi yêu cầu chấm công.");
-      setSubmitting(false);
+      stopCamera();
+      setCameraState("denied");
+      setError(reason instanceof Error && /permission|denied|notallowed/i.test(reason.message)
+        ? "Không thể mở camera. Hãy cấp quyền camera cho ứng dụng rồi thử lại."
+        : "Không thể khởi tạo Face AI. Hãy kiểm tra kết nối và thử lại.");
     }
   }
+
+  async function runLiveness() {
+    if (!videoRef.current || cameraState !== "ready" || !challenge) return;
+    const stored = sessionStorage.getItem("fastdo-face-session");
+    const faceSession = stored ? JSON.parse(stored) as { id: string; expiresAt: string } : null;
+    if (!faceSession || new Date(faceSession.expiresAt).getTime() <= Date.now()) {
+      setError("Phiên Face AI đã hết hạn. Vui lòng khởi tạo lại camera.");
+      setCameraState("idle");
+      stopCamera();
+      return;
+    }
+    setError("");
+    setScanState("neutral");
+    setProgress(4);
+    const faceApi = await loadFaceModels();
+    const descriptors: Float32Array[] = [];
+    let faceFrames = 0;
+    let neutralFrames = 0;
+    let challengeFrames = 0;
+    let motionScore = 0;
+    const startedAt = performance.now();
+    const deadline = startedAt + 14_000;
+
+    try {
+      while (performance.now() < deadline && !cancelledRef.current) {
+        const result = await faceApi
+          .detectSingleFace(videoRef.current, new faceApi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.58 }))
+          .withFaceLandmarks(true)
+          .withFaceDescriptor();
+        if (!result) {
+          await new Promise((resolve) => window.setTimeout(resolve, 90));
+          continue;
+        }
+        const box = result.detection.box;
+        const nose = result.landmarks.getNose();
+        const noseTip = nose[Math.min(3, nose.length - 1)];
+        const yaw = (noseTip.x - (box.x + box.width / 2)) / Math.max(1, box.width / 2);
+        faceFrames += 1;
+
+        if (neutralFrames < 7) {
+          if (Math.abs(yaw) <= 0.14) {
+            neutralFrames += 1;
+            descriptors.push(new Float32Array(result.descriptor));
+            setProgress(Math.min(48, 6 + neutralFrames * 6));
+          }
+        } else {
+          setScanState("challenge");
+          const directionalMotion = challenge === "TURN_LEFT" ? yaw : -yaw;
+          motionScore = Math.min(1, Math.max(motionScore, directionalMotion));
+          if (directionalMotion >= 0.18) {
+            challengeFrames += 1;
+            setProgress(Math.min(96, 52 + challengeFrames * 11));
+          }
+          if (challengeFrames >= 4) break;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 80));
+      }
+
+      const durationMs = Math.round(performance.now() - startedAt);
+      if (neutralFrames < 7) throw new Error("Chưa thu đủ khung hình nhìn thẳng. Hãy giữ điện thoại ngang tầm mắt và thử lại.");
+      if (challengeFrames < 4 || motionScore < 0.18) throw new Error(`Chưa nhận được động tác ${challenge === "TURN_LEFT" ? "quay trái" : "quay phải"}. Hãy thực hiện chậm và rõ hơn.`);
+      const descriptor = averageFaceDescriptors(descriptors);
+      if (descriptor.length !== 128) throw new Error("Không tạo được mẫu khuôn mặt hợp lệ. Vui lòng thử lại.");
+
+      setScanState("submitting");
+      setProgress(100);
+      const evidence: FaceEvidence = { challenge, durationMs, motionScore, faceFrames, neutralFrames };
+      const completion = await completeFaceSession({ sessionId: faceSession.id, descriptor, evidence });
+      sessionStorage.removeItem("fastdo-face-session");
+      setMatchScore(completion.matchScore);
+      stopCamera();
+      setCameraState("idle");
+      if (purpose === "ENROLL") {
+        setPurpose("VERIFY");
+        setFaceProofId("");
+        setProgress(0);
+        setScanState("enrolled");
+      } else {
+        setFaceProofId(completion.faceProofId);
+        setScanState("captured");
+      }
+    } catch (reason) {
+      setScanState("idle");
+      setProgress(0);
+      setError(reason instanceof Error ? reason.message : "Không thể xác minh người thật. Vui lòng quét lại.");
+    }
+  }
+
+  async function simulateDemo() {
+    if (purpose === "ENROLL" && !consented) {
+      setError("Hãy xác nhận đồng ý trước khi mô phỏng đăng ký khuôn mặt.");
+      return;
+    }
+    setError("");
+    const session = await startFaceSession(purpose);
+    const completion = await completeFaceSession({
+      sessionId: session.sessionId,
+      descriptor: Array.from({ length: 128 }, (_, index) => Math.sin(index + 1) * 0.01),
+      evidence: { challenge: session.challenge, durationMs: 2800, motionScore: 0.34, faceFrames: 14, neutralFrames: 8 },
+    });
+    setChallenge(session.challenge);
+    setMatchScore(completion.matchScore);
+    if (purpose === "ENROLL") {
+      setPurpose("VERIFY");
+      setFaceProofId("");
+      setProgress(0);
+      setScanState("enrolled");
+    } else {
+      setFaceProofId(completion.faceProofId);
+      setProgress(100);
+      setScanState("captured");
+    }
+  }
+
+  const instruction = scanState === "neutral" ? "Nhìn thẳng và giữ yên" : scanState === "challenge" ? (challenge === "TURN_LEFT" ? "Từ từ quay đầu sang trái" : "Từ từ quay đầu sang phải") : "Nhìn thẳng vào camera";
 
   return (
     <section className="screen face-screen" aria-labelledby="face-title">
       <header className="flow-header face-header">
         <button className="back-button" onClick={onBack} aria-label="Quay lại">×</button>
-        <div><h1 id="face-title">Xác thực khuôn mặt</h1><span>Bước 2/3 · Prototype camera</span></div>
+        <div><h1 id="face-title">{scanState === "enrolled" ? "Đăng ký hoàn tất" : purpose === "ENROLL" ? "Đăng ký khuôn mặt" : "Xác thực khuôn mặt"}</h1><span>Bước 2/3 · Face AI & Liveness</span></div>
         <span className="header-spacer" />
       </header>
 
       <main className="camera-stage">
         <video ref={videoRef} autoPlay muted playsInline className={cameraState === "ready" ? "visible" : ""} />
-        <div className={`face-oval ${scanState === "scanning" ? "is-scanning" : ""} ${scanState === "captured" ? "is-captured" : ""}`}>
+        <div className={`face-oval ${scanState === "neutral" || scanState === "challenge" || scanState === "submitting" ? "is-scanning" : ""} ${scanState === "captured" ? "is-captured" : ""}`}>
           <span className="corner corner--tl" /><span className="corner corner--tr" /><span className="corner corner--bl" /><span className="corner corner--br" />
-          {scanState === "scanning" && <span className="scan-line" />}
-          {cameraState !== "ready" && <div className="face-placeholder"><span>◉</span><p>Đặt khuôn mặt vào khung hình</p></div>}
+          {(scanState === "neutral" || scanState === "challenge") && <span className="scan-line" />}
+          {cameraState !== "ready" && scanState !== "captured" && scanState !== "enrolled" && <div className="face-placeholder"><span>◉</span><p>Đặt khuôn mặt vào khung hình</p></div>}
+          {(scanState === "captured" || scanState === "enrolled") && <div className="face-complete-mark">✓</div>}
         </div>
 
         <div className="camera-copy">
-          <h2>{demoBypassed ? "Mô phỏng Face AI" : scanState === "captured" ? "Đã thu mẫu thử nghiệm" : cameraState === "ready" ? "Nhìn thẳng vào camera" : "Cho phép truy cập camera"}</h2>
-          <p>{demoBypassed ? "Không có ảnh hoặc dữ liệu sinh trắc học nào được thu trong chế độ demo." : scanState === "captured" ? "AI Face & Liveness sẽ được kết nối ở bước tiếp theo." : cameraState === "denied" ? "Không thể mở camera. Hãy kiểm tra quyền của trình duyệt." : "Giữ điện thoại ngang tầm mắt và ở nơi đủ sáng."}</p>
+          <h2>{scanState === "enrolled" ? "Mẫu khuôn mặt đã được bảo vệ" : scanState === "captured" ? "Khuôn mặt đã khớp" : scanState === "submitting" ? "Đang bảo vệ bằng chứng…" : instruction}</h2>
+          <p>{scanState === "enrolled" ? "Bây giờ hãy xác minh lại một lần để tạo bằng chứng chấm công dùng một lần." : scanState === "captured" ? `Độ tin cậy ${Math.round((matchScore ?? 1) * 100)}%. Bạn có thể tiếp tục xác minh tại cơ sở.` : cameraState === "denied" ? "Kiểm tra quyền camera của trình duyệt rồi thử lại." : scanState === "challenge" ? "Giữ điện thoại cố định, chỉ xoay đầu theo hướng yêu cầu." : "Không đeo khẩu trang, giữ đủ sáng và chỉ có một người trong khung hình."}</p>
         </div>
 
+        {(scanState === "neutral" || scanState === "challenge" || scanState === "submitting") && <div className="face-progress" aria-label={`Tiến độ xác thực ${progress}%`}><span style={{ width: `${progress}%` }} /></div>}
         <div className="liveness-status">
-          <span className={cameraState === "ready" ? "active" : ""}><b>✓</b>Đủ sáng</span>
-          <span className={scanState === "scanning" || scanState === "captured" ? "active" : ""}><b>○</b>Góc mặt</span>
-          <span className={scanState === "captured" ? "active" : ""}><b>✓</b>Chuyển động</span>
+          <span className={cameraState === "ready" || scanState === "captured" || scanState === "enrolled" ? "active" : ""}><b>✓</b>Phát hiện mặt</span>
+          <span className={scanState === "challenge" || scanState === "submitting" || scanState === "captured" || scanState === "enrolled" ? "active" : ""}><b>○</b>Thử thách</span>
+          <span className={scanState === "captured" || scanState === "enrolled" ? "active" : ""}><b>✓</b>Người thật</span>
         </div>
 
-        {cameraState !== "ready" && scanState !== "captured" && <button className="primary-button camera-action" onClick={startCamera} disabled={cameraState === "loading"}>{cameraState === "loading" ? "Đang mở camera…" : cameraState === "denied" ? "Thử lại camera" : "Bật camera"}</button>}
-        {demoMode && cameraState !== "ready" && scanState !== "captured" && <button className="secondary-button camera-demo-action" onClick={continueDemo}>Tiếp tục bản mô phỏng</button>}
-        {cameraState === "ready" && scanState === "idle" && <button className="primary-button camera-action" onClick={startScan}>Bắt đầu quét thử</button>}
-        {scanState === "scanning" && <button className="primary-button camera-action" disabled>Đang kiểm tra người thật…</button>}
+        {purpose === "ENROLL" && cameraState !== "ready" && scanState !== "captured" && <label className="biometric-consent"><input type="checkbox" checked={consented} onChange={(event) => setConsented(event.target.checked)} /><span><strong>Tôi đồng ý đăng ký dữ liệu khuôn mặt</strong>Chỉ mẫu số 128 chiều được gửi và lưu để đối chiếu; ảnh/video gốc chỉ xử lý trên thiết bị và không được tải lên máy chủ.</span></label>}
+        {cameraState !== "ready" && scanState !== "captured" && <button className="primary-button camera-action" onClick={() => void prepareCamera()} disabled={cameraState === "loading" || (purpose === "ENROLL" && !consented)}>{cameraState === "loading" ? "Đang tải Face AI…" : cameraState === "denied" ? "Thử lại camera" : purpose === "ENROLL" ? "Đồng ý & bật camera" : "Bật camera an toàn"}</button>}
+        {demoMode && cameraState !== "ready" && scanState !== "captured" && <button className="secondary-button camera-demo-action" onClick={() => void simulateDemo()} disabled={purpose === "ENROLL" && !consented}>Mô phỏng Face AI</button>}
+        {cameraState === "ready" && scanState === "idle" && <button className="primary-button camera-action" onClick={() => void runLiveness()}>Bắt đầu kiểm tra người thật</button>}
+        {(scanState === "neutral" || scanState === "challenge" || scanState === "submitting") && <button className="primary-button camera-action" disabled>{scanState === "submitting" ? "Đang xác thực trên máy chủ…" : instruction}</button>}
         {error && <p className="camera-error" role="alert">{error}</p>}
-        {scanState === "captured" && <button className="primary-button camera-action" onClick={complete} disabled={submitting}>{submitting ? "Đang chuyển bước…" : "Tiếp tục xác minh tại cơ sở"}</button>}
+        {scanState === "captured" && <button className="primary-button camera-action" onClick={() => void onComplete(faceProofId)}>Tiếp tục xác minh tại cơ sở</button>}
+        <p className="face-privacy">● Camera chỉ xử lý trên thiết bị. FASTDO không tải ảnh hoặc video gốc lên máy chủ.</p>
       </main>
     </section>
   );
@@ -849,6 +1247,7 @@ export function AttendancePrototype() {
   const [user, setUser] = useState<AttendanceUser | null>(null);
   const [precheck, setPrecheck] = useState<PrecheckData | null>(null);
   const [location, setLocation] = useState<DeviceLocation | null>(null);
+  const [faceProofId, setFaceProofId] = useState("");
   const [checkInResult, setCheckInResult] = useState<CheckInResult | null>(null);
 
   useEffect(() => {
@@ -869,7 +1268,7 @@ export function AttendancePrototype() {
       .then((restoredUser) => {
         if (active && restoredUser) {
           setUser(restoredUser);
-          setScreen("home");
+          setScreen(restoredUser.mustChangePassword ? "password" : "home");
         }
       })
       .catch(() => {
@@ -881,21 +1280,24 @@ export function AttendancePrototype() {
   async function handleLogin(employeeId: string, password: string, remember: boolean) {
     const loggedInUser = await loginEmployee(employeeId, password, remember);
     setUser(loggedInUser);
-    setScreen("home");
+    setScreen(loggedInUser.mustChangePassword ? "password" : "home");
   }
 
   async function handleLogout() {
     await logoutEmployee(user);
     setUser(null);
     setPrecheck(null);
+    setFaceProofId("");
     setCheckInResult(null);
     setScreen("login");
   }
 
   async function completeCheckIn(presenceToken: string) {
+    if (!faceProofId) throw new Error("Bằng chứng khuôn mặt chưa sẵn sàng. Vui lòng quay lại xác thực.");
     const currentLocation = location ?? await readCurrentLocation(firebaseDemoMode());
-    const result = await submitCheckIn(currentLocation, presenceToken);
+    const result = await submitCheckIn(currentLocation, presenceToken, faceProofId);
     setCheckInResult(result);
+    setFaceProofId("");
     setScreen("success");
   }
 
@@ -919,18 +1321,19 @@ export function AttendancePrototype() {
     <main className="prototype-shell">
       <aside className="prototype-context">
         <Brand />
-        <p className="phase-tag">MVP · GIAI ĐOẠN 02</p>
+        <p className="phase-tag">PILOT · GIAI ĐOẠN 07</p>
         <h2>Chấm công rõ ràng.<br /><span>Bằng chứng đáng tin.</span></h2>
         <p className="context-lead">Nền móng trải nghiệm nhân viên cho hệ thống chấm công đa lớp Face AI, vị trí và hiện diện tại cơ sở.</p>
         <div className="phase-progress">
-          <div className="phase-progress__head"><span>Tiến độ luồng nền tảng</span><strong>02 / 03</strong></div>
+          <div className="phase-progress__head"><span>Tiến độ bảo mật đa lớp</span><strong>07 / 08</strong></div>
           <div className="phase-progress__bar"><span /></div>
         </div>
         <ul className="scope-list">
           <li className="done"><span>✓</span><div><strong>Đăng nhập nhân viên</strong><small>Firebase Auth và phiên đăng nhập thật</small></div></li>
           <li className="done"><span>✓</span><div><strong>Home ca làm</strong><small>Trạng thái sẵn sàng theo thời gian thực</small></div></li>
           <li className="done"><span>✓</span><div><strong>Pre-check đa lớp</strong><small>Functions, phân ca và dữ liệu cơ sở thật</small></div></li>
-          <li className="active"><span>→</span><div><strong>Face AI & Presence</strong><small>Camera đã có · liveness AI là bước tiếp theo</small></div></li>
+          <li className="done"><span>✓</span><div><strong>Face AI & Presence</strong><small>Embedding 128 chiều · liveness thử thách ngẫu nhiên</small></div></li>
+          <li className="active"><span>→</span><div><strong>Workforce Admin</strong><small>Nhân viên, sinh mật khẩu tạm và phân ca</small></div></li>
         </ul>
         <p className="prototype-note"><span>●</span> {demoMode ? "Bản prototype tương tác · Dữ liệu mô phỏng" : "Firebase production · Dữ liệu đồng bộ thật"}</p>
       </aside>
@@ -940,10 +1343,11 @@ export function AttendancePrototype() {
         <div className="device-frame">
           <div className="device-status"><span>{time}</span><span className="device-island" /><span>▮ ◒</span></div>
           {screen === "login" && <LoginScreen onLogin={handleLogin} />}
+          {screen === "password" && user && <ChangeTemporaryPasswordScreen user={user} onChanged={(updatedUser) => { setUser(updatedUser); setScreen("home"); }} onLogout={() => void handleLogout()} />}
           {screen === "home" && user && <HomeScreen time={time} date={date} user={user} precheck={precheck} onCheckIn={() => setScreen("precheck")} onManageDevices={() => setScreen("devices")} onLogout={() => void handleLogout()} />}
           {screen === "devices" && user?.canManageDevices && <DeviceAdminScreen user={user} onBack={() => setScreen("home")} />}
-          {screen === "precheck" && <PrecheckScreen onBack={() => setScreen("home")} onContinue={(data, currentLocation) => { setPrecheck(data); setLocation(currentLocation); setScreen("face"); }} />}
-          {screen === "face" && <FaceScreen onBack={() => setScreen("precheck")} onComplete={async () => setScreen("presence")} />}
+          {screen === "precheck" && <PrecheckScreen onBack={() => setScreen("home")} onContinue={(data, currentLocation) => { setPrecheck(data); setLocation(currentLocation); setFaceProofId(""); setScreen("face"); }} />}
+          {screen === "face" && precheck && <FaceScreen precheck={precheck} onBack={() => { setFaceProofId(""); setScreen("precheck"); }} onComplete={async (proofId) => { setFaceProofId(proofId); setScreen("presence"); }} />}
           {screen === "presence" && precheck && <PresenceScreen precheck={precheck} onBack={() => setScreen("face")} onVerified={completeCheckIn} />}
           {screen === "success" && checkInResult && precheck && <SuccessScreen result={checkInResult} precheck={precheck} onStart={() => setScreen("session")} />}
           {screen === "session" && checkInResult && precheck && <SessionScreen result={checkInResult} precheck={precheck} onCheckOut={completeCheckOut} onHeartbeat={syncActiveSession} />}
