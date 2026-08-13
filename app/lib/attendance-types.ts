@@ -78,6 +78,7 @@ export interface PrecheckData {
     liveness: boolean;
     presenceProof: boolean;
   };
+  facePolicy?: PilotBranchPolicy;
 }
 
 export interface FaceSession {
@@ -194,4 +195,120 @@ export interface LocationHeartbeatResult {
   insideGeofence: boolean;
   distanceMeters: number;
   receivedAt: string;
+}
+
+export type PilotEnforcementMode = "OFF" | "MONITOR" | "REQUIRED";
+
+export interface PilotRollout {
+  label: string;
+  cohortPercent: number;
+  startsAt: string | null;
+  endsAt: string | null;
+  notes: string | null;
+}
+
+export interface PilotBranchPolicy {
+  branchId: string;
+  enforcementMode: PilotEnforcementMode;
+  effectiveEnforcementMode?: PilotEnforcementMode;
+  rolloutActive?: boolean;
+  inCohort?: boolean;
+  cohortBucket?: number;
+  faceMatchThreshold: number;
+  retentionDays: number;
+  rollout: PilotRollout;
+  version: number;
+  updatedAt: string | null;
+  updatedBy: string | null;
+}
+
+export interface PilotPolicy {
+  policies: PilotBranchPolicy[];
+}
+
+export interface PilotPolicyUpdate {
+  branchId: string;
+  enforcementMode: PilotEnforcementMode;
+  faceMatchThreshold: number;
+  retentionDays: number;
+  rollout: PilotRollout;
+}
+
+export interface AttendanceReportSummary {
+  returnedEvents: number;
+  checkIns: number;
+  checkOuts: number;
+  valid: number;
+  pendingReview: number;
+  rejected: number;
+  uniqueEmployees: number;
+  averageRiskScore: number;
+}
+
+export interface AttendanceReportRecord {
+  id: string;
+  userId: string;
+  employeeName: string;
+  employeeCode: string;
+  branchId: string;
+  branchName: string;
+  type: "CHECK_IN" | "CHECK_OUT";
+  status: "VALID" | "PENDING_REVIEW" | "REJECTED";
+  serverTimestamp: string;
+  distanceMeters: number | null;
+  locationAccuracy: number | null;
+  riskScore: number;
+  riskLevel: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  faceVerified: boolean;
+  presenceVerified: boolean;
+  deviceVerified: boolean;
+}
+
+export interface AttendanceReport {
+  range: { startDate: string; endDate: string; branchId: string | null; timezone: string };
+  pageSummary: AttendanceReportSummary;
+  rows: AttendanceReportRecord[];
+  truncated: boolean;
+  hasMore: boolean;
+  pagination: { limit: number; returned: number; hasMore: boolean };
+}
+
+export interface RealtimeAttendanceEntry {
+  sessionId: string;
+  userId: string;
+  employeeName: string;
+  employeeCode: string;
+  branchId: string;
+  branchName: string;
+  status: string;
+  startedAt: string;
+  lastHeartbeatAt: string | null;
+  insideGeofence: boolean | null;
+  distanceMeters: number | null;
+  riskScore: number;
+  heartbeatStale: boolean;
+}
+
+export interface RealtimeMonitor {
+  generatedAt: string;
+  pageSummary: {
+    returnedActive: number;
+    insideGeofence: number;
+    outsideGeofence: number;
+    unknownGeofence: number;
+    staleHeartbeat: number;
+    highRisk: number;
+  };
+  rows: RealtimeAttendanceEntry[];
+  truncated: boolean;
+  hasMore: boolean;
+  pagination: { limit: number; returned: number; hasMore: boolean };
+}
+
+export interface FaceConsentWithdrawal {
+  withdrawn: boolean;
+  faceEnrollmentStatus: "NOT_STARTED";
+  revokedSessions: number;
+  revokedProofs: number;
+  withdrawnAt: string;
 }

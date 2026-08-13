@@ -4,10 +4,10 @@ import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import QRCode from "qrcode";
 import { firebaseDemoMode } from "./lib/firebase-client";
-import { assignEmployeeShift, changeTemporaryPassword, completeFaceSession, createEmployee, createPresenceChallenge, getAdminWorkforce, getPrecheck, listManagedDevices, loginEmployee, logoutEmployee, readCurrentLocation, requestPasswordReset, resetEmployeeFace, restoreAuthenticatedUser, reviewManagedDevice, sendLocationHeartbeat, startFaceSession, submitCheckIn, submitCheckOut, updateEmployee, verifyPresenceChallenge } from "./lib/attendance-api";
-import type { AdminDevice, AdminWorkforce, AttendanceUser, CheckInResult, DeviceLocation, DeviceStatus, FaceChallenge, FaceEvidence, FacePurpose, LocationHeartbeatResult, PrecheckData, PresenceChallenge, WorkforceEmployee } from "./lib/attendance-types";
+import { assignEmployeeShift, changeTemporaryPassword, completeFaceSession, createEmployee, createPresenceChallenge, getAdminWorkforce, getAttendanceReport, getPilotPolicy, getPrecheck, getRealtimeMonitor, listManagedDevices, loginEmployee, logoutEmployee, readCurrentLocation, requestPasswordReset, resetEmployeeFace, restoreAuthenticatedUser, reviewManagedDevice, sendLocationHeartbeat, startFaceSession, submitCheckIn, submitCheckOut, updateEmployee, updatePilotPolicy, verifyPresenceChallenge, withdrawFaceConsent } from "./lib/attendance-api";
+import type { AdminDevice, AdminWorkforce, AttendanceReport, AttendanceUser, CheckInResult, DeviceLocation, DeviceStatus, FaceChallenge, FaceEnrollmentStatus, FaceEvidence, FacePurpose, LocationHeartbeatResult, PilotBranchPolicy, PilotEnforcementMode, PrecheckData, PresenceChallenge, RealtimeMonitor, WorkforceBranch, WorkforceEmployee } from "./lib/attendance-types";
 
-type Screen = "login" | "password" | "home" | "devices" | "precheck" | "face" | "presence" | "success" | "session";
+type Screen = "login" | "password" | "home" | "profile" | "devices" | "precheck" | "face" | "presence" | "success" | "session";
 type CheckState = "waiting" | "checking" | "success" | "warning";
 
 interface BarcodeDetectorLike {
@@ -44,6 +44,9 @@ const checks = [
     detail: "Kết nối ổn định",
   },
 ] as const;
+
+const REPORT_TODAY = new Date().toISOString().slice(0, 10);
+const REPORT_WEEK_AGO = new Date(new Date().getTime() - 6 * 86400000).toISOString().slice(0, 10);
 
 function Brand({ compact = false }: { compact?: boolean }) {
   return (
@@ -224,7 +227,8 @@ function ChangeTemporaryPasswordScreen({ user, onChanged, onLogout }: { user: At
   );
 }
 
-function HomeScreen({ time, date, user, precheck, onCheckIn, onManageDevices, onLogout }: { time: string; date: string; user: AttendanceUser; precheck: PrecheckData | null; onCheckIn: () => void; onManageDevices: () => void; onLogout: () => void }) {
+function HomeScreen({ time, date, user, precheck, onCheckIn, onManageDevices, onProfile }: { time: string; date: string; user: AttendanceUser; precheck: PrecheckData | null; onCheckIn: () => void; onManageDevices: () => void; onProfile: () => void }) {
+  const initials = user.fullName.trim().split(/\s+/).slice(-2).map((part) => part[0]).join("").toUpperCase();
   return (
     <section className="screen home-screen" aria-labelledby="home-title">
       <header className="mobile-header">
@@ -235,7 +239,7 @@ function HomeScreen({ time, date, user, precheck, onCheckIn, onManageDevices, on
         </div>
         <div className="header-actions">
           <button className="icon-button" aria-label="Thông báo"><span className="notification-dot" />♧</button>
-          <button className="avatar-button" onClick={onLogout} aria-label="Đăng xuất tài khoản Hải Âu">HÂ</button>
+          <button className="avatar-button" onClick={onProfile} aria-label="Mở hồ sơ và quyền riêng tư">{initials}</button>
         </div>
       </header>
 
@@ -286,7 +290,7 @@ function HomeScreen({ time, date, user, precheck, onCheckIn, onManageDevices, on
         <button><span>◷</span>Lịch sử</button>
         {user.canManageDevices
           ? <button onClick={onManageDevices}><span>⚙</span>Quản trị</button>
-          : <button><span>♙</span>Cá nhân</button>}
+          : <button onClick={onProfile}><span>♙</span>Cá nhân</button>}
       </nav>
     </section>
   );
@@ -303,6 +307,57 @@ function formatDeviceTime(value: string | null): string {
     minute: "2-digit",
     timeZone: "Asia/Ho_Chi_Minh",
   }).format(date);
+}
+
+function ProfileScreen({ user, initialFaceStatus, onBack, onLogout, onWithdrawn }: { user: AttendanceUser; initialFaceStatus: FaceEnrollmentStatus | null; onBack: () => void; onLogout: () => void; onWithdrawn: () => void }) {
+  const [faceStatus, setFaceStatus] = useState<FaceEnrollmentStatus | null>(initialFaceStatus);
+  const [statusLoading, setStatusLoading] = useState(true);
+  const [withdrawing, setWithdrawing] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    void getPrecheck().then((data) => { if (active) setFaceStatus(data.employee.faceEnrollmentStatus); }).catch(() => undefined).finally(() => { if (active) setStatusLoading(false); });
+    return () => { active = false; };
+  }, []);
+
+  async function withdraw() {
+    const confirmed = window.confirm("Rút đồng ý Face AI và xóa mẫu khuôn mặt? Các phiên và bằng chứng Face chưa dùng sẽ bị thu hồi. Bạn có thể phải dùng phương thức chấm công thay thế.");
+    if (!confirmed) return;
+    setWithdrawing(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await withdrawFaceConsent();
+      setFaceStatus(result.faceEnrollmentStatus);
+      onWithdrawn();
+      setNotice(`Đã rút đồng ý và xóa mẫu. Đã thu hồi ${result.revokedSessions} phiên, ${result.revokedProofs} bằng chứng Face.`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Không thể rút đồng ý Face AI.");
+    } finally {
+      setWithdrawing(false);
+    }
+  }
+
+  return (
+    <section className="screen profile-screen" aria-labelledby="profile-title">
+      <header className="flow-header"><button className="back-button" onClick={onBack} aria-label="Quay lại">←</button><div><h1 id="profile-title">Cá nhân & quyền riêng tư</h1><span>Kiểm soát dữ liệu của bạn</span></div><span className="header-spacer" /></header>
+      <main className="profile-content">
+        <section className="profile-identity"><span>{user.fullName.trim().split(/\s+/).slice(-2).map((part) => part[0]).join("").toUpperCase()}</span><div><strong>{user.fullName}</strong><small>{user.employeeCode} · {user.email}</small></div></section>
+        <section className="face-consent-card" aria-labelledby="face-privacy-title">
+          <div className="face-consent-card__head"><span>◉</span><div><small>DỮ LIỆU SINH TRẮC HỌC</small><h2 id="face-privacy-title">Quyền riêng tư Face AI</h2></div></div>
+          <div className="face-consent-state"><span className={`face-state ${faceStatus ? `face-state--${faceStatus.toLowerCase()}` : ""}`}>● {statusLoading ? "Đang kiểm tra…" : faceStatus ? faceStatusLabel(faceStatus) : "Không thể tải trạng thái"}</span><small>{faceStatus === "APPROVED" ? "Đang có hiệu lực" : faceStatus === "NOT_STARTED" ? "Không lưu mẫu hoạt động" : "Có thể thử lại sau"}</small></div>
+          <p>FASTDO lưu mẫu số đã mã hóa để đối chiếu khuôn mặt. Ảnh và video gốc chỉ được xử lý trên thiết bị, không tải lên máy chủ.</p>
+          <ul><li>Bạn có thể rút đồng ý bất cứ lúc nào.</li><li>Rút đồng ý sẽ xóa mẫu và thu hồi phiên Face chưa dùng.</li><li>Nhật ký chấm công hợp lệ vẫn được lưu theo quy định doanh nghiệp.</li></ul>
+          {error && <p className="admin-message admin-message--error" role="alert">{error}</p>}
+          {notice && <p className="admin-message admin-message--success" role="status">{notice}</p>}
+          {!statusLoading && (faceStatus !== "NOT_STARTED" ? <button className="danger-button" onClick={() => void withdraw()} disabled={withdrawing}>{withdrawing ? "Đang xóa an toàn…" : "Rút đồng ý & xóa mẫu"}</button> : <div className="face-consent-empty">Chưa có mẫu Face AI để xóa.</div>)}
+        </section>
+        <button className="secondary-button profile-logout" onClick={onLogout}>Đăng xuất tài khoản</button>
+      </main>
+    </section>
+  );
 }
 
 function PresenceAdminPanel() {
@@ -558,8 +613,232 @@ function WorkforceAdminPanel({ mode }: { mode: "EMPLOYEES" | "SHIFTS" }) {
   );
 }
 
+function modeLabel(mode: PilotEnforcementMode): string {
+  if (mode === "REQUIRED") return "Bắt buộc";
+  if (mode === "MONITOR") return "Theo dõi";
+  return "Tắt";
+}
+
+function PilotAdminPanel({ canEdit }: { canEdit: boolean }) {
+  const [policies, setPolicies] = useState<PilotBranchPolicy[]>([]);
+  const [branches, setBranches] = useState<WorkforceBranch[]>([]);
+  const [selectedBranchId, setSelectedBranchId] = useState("");
+  const [draft, setDraft] = useState<PilotBranchPolicy | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const [policyData, workforce] = await Promise.all([getPilotPolicy(), getAdminWorkforce()]);
+      setPolicies(policyData.policies);
+      setBranches(workforce.branches);
+      const first = policyData.policies.find((policy) => policy.branchId === selectedBranchId) ?? policyData.policies[0] ?? null;
+      setSelectedBranchId(first?.branchId ?? "");
+      setDraft(first ? { ...first, rollout: { ...first.rollout } } : null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Không thể tải chính sách pilot.");
+    } finally {
+      setLoading(false);
+    }
+  }, [selectedBranchId]);
+
+  useEffect(() => {
+    let active = true;
+    void Promise.all([getPilotPolicy(), getAdminWorkforce()])
+      .then(([policyData, workforce]) => {
+        if (!active) return;
+        setPolicies(policyData.policies);
+        setBranches(workforce.branches);
+        const first = policyData.policies[0] ?? null;
+        setSelectedBranchId(first?.branchId ?? "");
+        setDraft(first ? { ...first, rollout: { ...first.rollout } } : null);
+      })
+      .catch((reason) => { if (active) setError(reason instanceof Error ? reason.message : "Không thể tải chính sách pilot."); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, []);
+
+  function selectBranch(branchId: string) {
+    setSelectedBranchId(branchId);
+    const policy = policies.find((item) => item.branchId === branchId);
+    setDraft(policy ? { ...policy, rollout: { ...policy.rollout } } : null);
+    setNotice("");
+    setError("");
+  }
+
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!draft) return;
+    if (!canEdit) {
+      setError("Vai trò của bạn chỉ được xem chính sách pilot.");
+      return;
+    }
+    if (draft.faceMatchThreshold < 0.35 || draft.faceMatchThreshold > 0.65) {
+      setError("Ngưỡng khớp Face phải từ 0.35 đến 0.65.");
+      return;
+    }
+    if (draft.retentionDays < 1 || draft.retentionDays > 365) {
+      setError("Thời gian lưu mẫu phải từ 1 đến 365 ngày.");
+      return;
+    }
+    if (!Number.isInteger(draft.rollout.cohortPercent) || draft.rollout.cohortPercent < 1 || draft.rollout.cohortPercent > 100) {
+      setError("Nhóm áp dụng phải là số nguyên từ 1 đến 100%.");
+      return;
+    }
+    if (draft.rollout.startsAt && draft.rollout.endsAt && new Date(draft.rollout.endsAt).getTime() <= new Date(draft.rollout.startsAt).getTime()) {
+      setError("Ngày kết thúc phải sau ngày bắt đầu.");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await updatePilotPolicy({
+        branchId: draft.branchId,
+        enforcementMode: draft.enforcementMode,
+        faceMatchThreshold: draft.faceMatchThreshold,
+        retentionDays: draft.retentionDays,
+        rollout: draft.rollout,
+      });
+      const updated = result.policies[0];
+      setPolicies((current) => current.map((policy) => policy.branchId === updated.branchId ? updated : policy));
+      setDraft({ ...updated, rollout: { ...updated.rollout } });
+      setNotice(`Đã cập nhật ${modeLabel(updated.enforcementMode).toLowerCase()} cho ${branches.find((branch) => branch.id === updated.branchId)?.name ?? "chi nhánh"}.`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Không thể cập nhật chính sách pilot.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loading) return <div className="workforce-loading"><span className="status-spinner" /> Đang tải chính sách pilot…</div>;
+  if (error && !draft) return <div className="device-empty"><strong>Chưa tải được chính sách</strong><p>{error}</p><button className="secondary-button" onClick={() => void load()}>Thử lại</button></div>;
+  if (!draft) return <div className="device-empty"><span>⌁</span><strong>Chưa có chi nhánh pilot</strong><p>Tạo chính sách pilot cho chi nhánh trước khi bật Face AI.</p></div>;
+
+  return (
+    <section className="pilot-panel" aria-labelledby="pilot-policy-title">
+      <div className="workforce-heading"><div><small>ROLLOUT CONTROL</small><h2 id="pilot-policy-title">Chính sách pilot</h2></div><span>v{draft.version}</span></div>
+      {!canEdit && <p className="pilot-readonly" role="status">Chế độ chỉ đọc · Chỉ SUPER ADMIN và COMPANY ADMIN được thay đổi chính sách.</p>}
+      <div className="pilot-mode-guide" aria-label="Ý nghĩa chế độ pilot"><span><b>OFF</b> Không thu Face</span><span><b>MONITOR</b> Tự nguyện</span><span><b>REQUIRED</b> Bắt buộc</span></div>
+      <form className={`workforce-form pilot-form ${canEdit ? "" : "is-readonly"}`} onSubmit={save}>
+        <label><span>Chi nhánh</span><select value={selectedBranchId} onChange={(event) => selectBranch(event.target.value)}>{policies.map((policy) => <option value={policy.branchId} key={policy.branchId}>{branches.find((branch) => branch.id === policy.branchId)?.name ?? policy.branchId}</option>)}</select></label>
+        <fieldset className="pilot-modes" disabled={!canEdit}><legend>Mức thực thi Face AI</legend>{(["OFF", "MONITOR", "REQUIRED"] as const).map((mode) => <label className={draft.enforcementMode === mode ? "active" : ""} key={mode}><input type="radio" name="pilot-mode" value={mode} checked={draft.enforcementMode === mode} onChange={() => setDraft((current) => current ? { ...current, enforcementMode: mode } : current)} /><strong>{mode}</strong><small>{modeLabel(mode)}</small></label>)}</fieldset>
+        <div className="workforce-form__split"><label><span>Ngưỡng khớp</span><input type="number" min="0.35" max="0.65" step="0.01" value={draft.faceMatchThreshold} disabled={!canEdit} onChange={(event) => setDraft((current) => current ? { ...current, faceMatchThreshold: Number(event.target.value) } : current)} /></label><label><span>Lưu mẫu (ngày)</span><input type="number" min="1" max="365" value={draft.retentionDays} disabled={!canEdit} onChange={(event) => setDraft((current) => current ? { ...current, retentionDays: Number(event.target.value) } : current)} /></label></div>
+        <label><span>Tên đợt pilot</span><input value={draft.rollout.label} disabled={!canEdit} onChange={(event) => setDraft((current) => current ? { ...current, rollout: { ...current.rollout, label: event.target.value } } : current)} /></label>
+        <div className="workforce-form__split"><label><span>Nhóm áp dụng (%)</span><input type="number" min="1" max="100" step="1" value={draft.rollout.cohortPercent} disabled={!canEdit} onChange={(event) => setDraft((current) => current ? { ...current, rollout: { ...current.rollout, cohortPercent: Number(event.target.value) } } : current)} /></label><label><span>Bắt đầu</span><input type="date" value={draft.rollout.startsAt?.slice(0, 10) ?? ""} disabled={!canEdit} onChange={(event) => setDraft((current) => current ? { ...current, rollout: { ...current.rollout, startsAt: event.target.value || null } } : current)} /></label></div>
+        <label><span>Kết thúc (không bắt buộc)</span><input type="date" min={draft.rollout.startsAt ? new Date(new Date(draft.rollout.startsAt).getTime() + 86400000).toISOString().slice(0, 10) : undefined} value={draft.rollout.endsAt?.slice(0, 10) ?? ""} disabled={!canEdit} onChange={(event) => setDraft((current) => current ? { ...current, rollout: { ...current.rollout, endsAt: event.target.value || null } } : current)} /></label>
+        <label><span>Ghi chú vận hành</span><input value={draft.rollout.notes ?? ""} disabled={!canEdit} onChange={(event) => setDraft((current) => current ? { ...current, rollout: { ...current.rollout, notes: event.target.value || null } } : current)} placeholder="Mục tiêu và lưu ý cho đội vận hành" /></label>
+        <div className={`pilot-impact pilot-impact--${draft.enforcementMode.toLowerCase()}`}><strong>{modeLabel(draft.enforcementMode)}</strong><p>{draft.enforcementMode === "OFF" ? "Face AI bị tắt tại chi nhánh; hệ thống không bắt đầu phiên hoặc thu mẫu mới." : draft.enforcementMode === "MONITOR" ? "Nhân viên có thể tự nguyện dùng Face; chấm công vẫn tiếp tục khi bỏ qua." : "Face và liveness là điều kiện bắt buộc trước khi ghi nhận chấm công."}</p></div>
+        {error && <p className="admin-message admin-message--error" role="alert">{error}</p>}
+        {notice && <p className="admin-message admin-message--success" role="status">{notice}</p>}
+        {canEdit && <button className="primary-button" type="submit" disabled={saving}>{saving ? "Đang áp dụng an toàn…" : "Lưu chính sách chi nhánh"}</button>}
+      </form>
+    </section>
+  );
+}
+
+function formatReportTime(value: string | null, timeZone = "Asia/Ho_Chi_Minh"): string {
+  if (!value) return "Chưa có";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Chưa có";
+  return new Intl.DateTimeFormat("vi-VN", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", timeZone }).format(date);
+}
+
+function exportReportCsv(report: AttendanceReport) {
+  if (report.truncated || report.hasMore) return;
+  const escape = (value: unknown) => {
+    const raw = String(value ?? "");
+    const formulaSafe = /^[\t\r ]*[=+\-@]/.test(raw) ? `'${raw}` : raw;
+    return `"${formulaSafe.replaceAll('"', '""')}"`;
+  };
+  const header = ["Thời gian", "Mã NV", "Nhân viên", "Chi nhánh", "Loại", "Trạng thái", "Khoảng cách (m)", "Độ chính xác GPS (m)", "Rủi ro", "Face", "Presence", "Thiết bị"];
+  const rows = report.rows.map((row) => [row.serverTimestamp, row.employeeCode, row.employeeName, row.branchName, row.type, row.status, row.distanceMeters, row.locationAccuracy, row.riskScore, row.faceVerified ? "Có" : "Không", row.presenceVerified ? "Có" : "Không", row.deviceVerified ? "Có" : "Không"]);
+  const csv = `\uFEFF${[header, ...rows].map((row) => row.map(escape).join(",")).join("\r\n")}`;
+  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `fastdo-attendance-${report.range.startDate}-${report.range.endDate}.csv`;
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function ReportsAdminPanel() {
+  const [mode, setMode] = useState<"REALTIME" | "REPORT">("REALTIME");
+  const [branches, setBranches] = useState<WorkforceBranch[]>([]);
+  const [branchId, setBranchId] = useState("");
+  const [startDate, setStartDate] = useState(REPORT_WEEK_AGO);
+  const [endDate, setEndDate] = useState(REPORT_TODAY);
+  const [monitor, setMonitor] = useState<RealtimeMonitor | null>(null);
+  const [report, setReport] = useState<AttendanceReport | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const loadMonitor = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try { setMonitor(await getRealtimeMonitor({ ...(branchId ? { branchId } : {}), limit: 100 })); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Không thể tải realtime monitor."); }
+    finally { setLoading(false); }
+  }, [branchId]);
+
+  useEffect(() => {
+    let active = true;
+    void getAdminWorkforce().then((data) => { if (active) setBranches(data.branches); }).catch(() => undefined);
+    return () => { active = false; };
+  }, []);
+  useEffect(() => {
+    if (mode !== "REALTIME") return;
+    let active = true;
+    void getRealtimeMonitor({ ...(branchId ? { branchId } : {}), limit: 100 })
+      .then((data) => { if (active) { setMonitor(data); setError(""); } })
+      .catch((reason) => { if (active) setError(reason instanceof Error ? reason.message : "Không thể tải realtime monitor."); })
+      .finally(() => { if (active) setLoading(false); });
+    const timer = window.setInterval(() => void loadMonitor(), 30000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [mode, branchId, loadMonitor]);
+
+  async function loadReport(event?: FormEvent<HTMLFormElement>) {
+    event?.preventDefault();
+    if (endDate < startDate) { setError("Ngày kết thúc phải bằng hoặc sau ngày bắt đầu."); return; }
+    setLoading(true);
+    setError("");
+    try { setReport(await getAttendanceReport({ startDate, endDate, branchId: branchId || undefined, limit: 500 })); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Không thể tải báo cáo chấm công."); }
+    finally { setLoading(false); }
+  }
+
+  return (
+    <section className="reports-panel" aria-labelledby="reports-title">
+      <div className="workforce-heading"><div><small>OPERATIONS CENTER</small><h2 id="reports-title">Báo cáo chấm công</h2></div>{mode === "REALTIME" && <span>● Tự làm mới 30s</span>}</div>
+      <div className="report-mode-tabs"><button className={mode === "REALTIME" ? "active" : ""} onClick={() => setMode("REALTIME")}>Realtime monitor</button><button className={mode === "REPORT" ? "active" : ""} onClick={() => setMode("REPORT")}>Báo cáo kỳ</button></div>
+      <label className="report-branch"><span>Chi nhánh</span><select value={branchId} onChange={(event) => setBranchId(event.target.value)}><option value="">Tất cả chi nhánh</option>{branches.map((branch) => <option value={branch.id} key={branch.id}>{branch.name}</option>)}</select></label>
+
+      {mode === "REALTIME" ? <>
+        <div className="report-actions"><small>{monitor ? `Cập nhật ${formatReportTime(monitor.generatedAt)}` : "Chưa có dữ liệu"}</small><button onClick={() => void loadMonitor()} disabled={loading}>↻ Làm mới</button></div>
+        {loading && !monitor && <div className="workforce-loading"><span className="status-spinner" /> Đang đồng bộ realtime…</div>}
+        {error && <p className="admin-message admin-message--error" role="alert">{error}</p>}
+        {monitor && <><div className="realtime-stats realtime-stats--five"><div><strong>{monitor.pageSummary.returnedActive}</strong><span>Phiên trả về</span></div><div><strong>{monitor.pageSummary.insideGeofence}</strong><span>Trong vùng</span></div><div className={monitor.pageSummary.outsideGeofence ? "warn" : ""}><strong>{monitor.pageSummary.outsideGeofence}</strong><span>Ngoài vùng</span></div><div className={monitor.pageSummary.unknownGeofence ? "neutral" : ""}><strong>{monitor.pageSummary.unknownGeofence}</strong><span>Chưa có GPS</span></div><div className={monitor.pageSummary.highRisk ? "danger" : ""}><strong>{monitor.pageSummary.highRisk}</strong><span>Rủi ro cao</span></div></div>
+        {(monitor.truncated || monitor.hasMore) && <p className="admin-message admin-message--warning" role="status">Đang hiển thị {monitor.pagination.returned} phiên trong trang dữ liệu trả về; vẫn còn phiên khác. Hãy lọc theo chi nhánh để xem đầy đủ hơn.</p>}
+        <div className="realtime-list" aria-live="polite">{monitor.rows.length === 0 ? <div className="device-empty"><span>◷</span><strong>Chưa có nhân viên trong ca</strong><p>Dữ liệu sẽ xuất hiện khi có phiên chấm công đang hoạt động.</p></div> : monitor.rows.map((row) => <article className={`realtime-card ${row.insideGeofence === false || row.heartbeatStale ? "has-alert" : row.insideGeofence === null ? "is-neutral" : ""}`} key={row.sessionId}><span className="device-owner-avatar">{row.employeeName.trim().split(/\s+/).slice(-2).map((part) => part[0]).join("").toUpperCase()}</span><div><strong>{row.employeeName}</strong><small>{row.employeeCode} · {row.branchName}</small><p>{row.heartbeatStale ? "Mất tín hiệu heartbeat" : row.insideGeofence === null ? "Chưa có dữ liệu GPS" : row.insideGeofence ? "Trong vùng làm việc" : `Ngoài vùng${row.distanceMeters === null ? "" : ` · ${Math.round(row.distanceMeters)} m`}`}</p></div><b>{row.riskScore}</b></article>)}</div></>}
+      </> : <>
+        <form className="report-filters" onSubmit={(event) => void loadReport(event)}><label><span>Từ ngày</span><input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} /></label><label><span>Đến ngày</span><input type="date" min={startDate} value={endDate} onChange={(event) => setEndDate(event.target.value)} /></label><button type="submit" disabled={loading}>{loading ? "Đang tải…" : "Xem báo cáo"}</button></form>
+        {error && <p className="admin-message admin-message--error" role="alert">{error}</p>}
+        {report && <><div className="report-summary"><div><strong>{report.pageSummary.returnedEvents}</strong><span>Sự kiện trả về</span></div><div><strong>{report.pageSummary.uniqueEmployees}</strong><span>NV trong trang</span></div><div><strong>{report.pageSummary.pendingReview}</strong><span>Chờ duyệt</span></div><div><strong>{report.pageSummary.averageRiskScore}</strong><span>Rủi ro TB trang</span></div></div>{(report.truncated || report.hasMore) && <p className="admin-message admin-message--warning" role="alert">Trang dữ liệu trả về {report.pagination.returned}/{report.pagination.limit} bản ghi và vẫn còn dữ liệu khác. CSV bị khóa để tránh xuất báo cáo thiếu; hãy thu hẹp ngày hoặc chọn một chi nhánh.</p>}<div className="report-export"><p>{report.pagination.returned} bản ghi trả về · {report.range.timezone}</p><button onClick={() => exportReportCsv(report)} disabled={report.truncated || report.hasMore} title={report.truncated || report.hasMore ? "Thu hẹp bộ lọc để xuất báo cáo đầy đủ" : undefined}>{report.truncated || report.hasMore ? "CSV chưa đầy đủ" : "↓ Xuất CSV"}</button></div><div className="report-list">{report.rows.length === 0 ? <div className="device-empty"><span>□</span><strong>Không có dữ liệu trong kỳ</strong><p>Thử đổi khoảng ngày hoặc chọn tất cả chi nhánh.</p></div> : report.rows.map((row) => <article className="report-row" key={row.id}><div><strong>{row.employeeName}</strong><small>{row.employeeCode} · {row.branchName}</small></div><div><b className={`report-status report-status--${row.status.toLowerCase()}`}>{row.status === "VALID" ? "Hợp lệ" : row.status === "REJECTED" ? "Từ chối" : "Chờ duyệt"}</b><small>{formatReportTime(row.serverTimestamp, report.range.timezone)} · Rủi ro {row.riskScore}</small></div></article>)}</div></>}
+        {!report && !loading && <div className="device-empty"><span>▤</span><strong>Chọn kỳ báo cáo</strong><p>Chọn khoảng ngày rồi tải dữ liệu chấm công thật từ Firebase.</p></div>}
+      </>}
+    </section>
+  );
+}
+
 function DeviceAdminScreen({ user, onBack }: { user: AttendanceUser; onBack: () => void }) {
-  const [section, setSection] = useState<"DEVICES" | "PRESENCE" | "EMPLOYEES" | "SHIFTS">("DEVICES");
+  const [section, setSection] = useState<"DEVICES" | "PRESENCE" | "EMPLOYEES" | "SHIFTS" | "PILOT" | "REPORTS">("DEVICES");
   const [devices, setDevices] = useState<AdminDevice[]>([]);
   const [filter, setFilter] = useState<"ALL" | DeviceStatus>("ALL");
   const [loading, setLoading] = useState(true);
@@ -623,7 +902,7 @@ function DeviceAdminScreen({ user, onBack }: { user: AttendanceUser; onBack: () 
         <button className="back-button" onClick={onBack} aria-label="Quay lại">←</button>
         <div>
           <span>TRUNG TÂM QUẢN TRỊ</span>
-          <h1 id="device-admin-title">{section === "DEVICES" ? "Kiểm soát truy cập" : section === "PRESENCE" ? "Hiện diện tại cơ sở" : section === "EMPLOYEES" ? "Đội ngũ nhân viên" : "Ca làm & phân công"}</h1>
+          <h1 id="device-admin-title">{section === "DEVICES" ? "Kiểm soát truy cập" : section === "PRESENCE" ? "Hiện diện tại cơ sở" : section === "EMPLOYEES" ? "Đội ngũ nhân viên" : section === "SHIFTS" ? "Ca làm & phân công" : section === "PILOT" ? "Điều hành pilot" : "Báo cáo & realtime"}</h1>
         </div>
         <button className="admin-refresh" onClick={() => section === "DEVICES" && void refresh()} disabled={section !== "DEVICES" || loading} aria-label="Tải lại danh sách">↻</button>
       </header>
@@ -640,9 +919,11 @@ function DeviceAdminScreen({ user, onBack }: { user: AttendanceUser; onBack: () 
           <button className={section === "PRESENCE" ? "active" : ""} onClick={() => setSection("PRESENCE")}>▦ Presence QR</button>
           <button className={section === "EMPLOYEES" ? "active" : ""} onClick={() => setSection("EMPLOYEES")}>♙ Nhân viên</button>
           <button className={section === "SHIFTS" ? "active" : ""} onClick={() => setSection("SHIFTS")}>◷ Phân ca</button>
+          <button className={section === "PILOT" ? "active" : ""} onClick={() => setSection("PILOT")}>⌁ Pilot</button>
+          <button className={section === "REPORTS" ? "active" : ""} onClick={() => setSection("REPORTS")}>▤ Báo cáo</button>
         </nav>
 
-        {section === "PRESENCE" ? <PresenceAdminPanel /> : section === "EMPLOYEES" || section === "SHIFTS" ? <WorkforceAdminPanel mode={section} /> : <><div className="device-stats">
+        {section === "PRESENCE" ? <PresenceAdminPanel /> : section === "EMPLOYEES" || section === "SHIFTS" ? <WorkforceAdminPanel mode={section} /> : section === "PILOT" ? <PilotAdminPanel canEdit={user.role === "SUPER_ADMIN" || user.role === "COMPANY_ADMIN"} /> : section === "REPORTS" ? <ReportsAdminPanel /> : <><div className="device-stats">
           <button className={filter === "PENDING" ? "active" : ""} onClick={() => setFilter("PENDING")}><strong>{counts.PENDING}</strong><span>Chờ duyệt</span></button>
           <button className={filter === "TRUSTED" ? "active" : ""} onClick={() => setFilter("TRUSTED")}><strong>{counts.TRUSTED}</strong><span>Đã duyệt</span></button>
           <button className={filter === "BLOCKED" ? "active" : ""} onClick={() => setFilter("BLOCKED")}><strong>{counts.BLOCKED}</strong><span>Đã khóa</span></button>
@@ -683,7 +964,7 @@ function DeviceAdminScreen({ user, onBack }: { user: AttendanceUser; onBack: () 
   );
 }
 
-function PrecheckScreen({ onBack, onContinue }: { onBack: () => void; onContinue: (precheck: PrecheckData, location: DeviceLocation) => void }) {
+function PrecheckScreen({ onBack, onContinue }: { onBack: () => void; onContinue: (precheck: PrecheckData, location: DeviceLocation, useFace: boolean) => void }) {
   const demoMode = firebaseDemoMode();
   const [states, setStates] = useState<Record<string, CheckState>>({
     device: "checking",
@@ -776,12 +1057,17 @@ function PrecheckScreen({ onBack, onContinue }: { onBack: () => void; onContinue
           <span>i</span>
           <p><strong>Dữ liệu của bạn được bảo vệ</strong>{demoMode ? "Vị trí chỉ được dùng để mô phỏng bước xác minh và chưa được gửi lên máy chủ." : "Vị trí chỉ được gửi an toàn tới Firebase khi chấm công và trong phiên làm việc."}</p>
         </div>
+        {precheck?.facePolicy && (() => {
+          const effectiveMode = precheck.facePolicy.effectiveEnforcementMode ?? precheck.facePolicy.enforcementMode;
+          return <div className={`precheck-policy precheck-policy--${effectiveMode.toLowerCase()}`}><span>FACE {effectiveMode}</span><p>{effectiveMode === "OFF" ? "Chi nhánh đang tắt Face AI; ứng dụng không thu dữ liệu khuôn mặt." : effectiveMode === "MONITOR" ? "Face AI đang ở chế độ tự nguyện để đánh giá pilot. Bạn có thể bỏ qua." : "Face AI và kiểm tra người thật là điều kiện bắt buộc tại chi nhánh."}</p></div>;
+        })()}
         {error && <p className="precheck-error" role="alert">{error}</p>}
       </main>
 
       <footer className="flow-footer">
-        <button className="primary-button" disabled={!complete && !error} onClick={() => error ? setRetryKey((value) => value + 1) : precheck && location && onContinue(precheck, location)}>
-          {complete ? "Tiếp tục xác thực khuôn mặt" : error ? "Thử lại kiểm tra" : "Đang kiểm tra điều kiện…"}
+        {complete && precheck && (precheck.facePolicy?.effectiveEnforcementMode ?? precheck.facePolicy?.enforcementMode) === "MONITOR" && <button className="secondary-button precheck-face-optional" onClick={() => location && onContinue(precheck, location, true)}>Thử Face AI tự nguyện</button>}
+        <button className="primary-button" disabled={!complete && !error} onClick={() => error ? setRetryKey((value) => value + 1) : precheck && location && onContinue(precheck, location, precheck.requirements.faceVerification)}>
+          {complete ? precheck?.requirements.faceVerification ? "Tiếp tục xác thực khuôn mặt" : "Tiếp tục không dùng Face" : error ? "Thử lại kiểm tra" : "Đang kiểm tra điều kiện…"}
         </button>
       </footer>
     </section>
@@ -1035,7 +1321,7 @@ function FaceScreen({ precheck, onBack, onComplete }: { precheck: PrecheckData; 
   );
 }
 
-function PresenceScreen({ precheck, onBack, onVerified }: { precheck: PrecheckData; onBack: () => void; onVerified: (proofId: string) => Promise<void> }) {
+function PresenceScreen({ precheck, faceUsed, onBack, onVerified }: { precheck: PrecheckData; faceUsed: boolean; onBack: () => void; onVerified: (proofId: string) => Promise<void> }) {
   const [code, setCode] = useState("");
   const [scanning, setScanning] = useState(false);
   const [verifying, setVerifying] = useState(false);
@@ -1117,10 +1403,10 @@ function PresenceScreen({ precheck, onBack, onVerified }: { precheck: PrecheckDa
     <section className="screen presence-screen" aria-labelledby="presence-title">
       <header className="flow-header">
         <button className="back-button" onClick={onBack} aria-label="Quay lại">←</button>
-        <div><h1 id="presence-title">Xác minh tại cơ sở</h1><span>Bước 3/3 · QR động</span></div>
+        <div><h1 id="presence-title">Xác minh tại cơ sở</h1><span>{faceUsed ? "Bước 3/3" : "Bước 2/2"} · QR động</span></div>
         <span className="header-spacer" />
       </header>
-      <div className="stepper" aria-label="Tiến trình chấm công"><span className="done" /><span className="done" /><span className="done" /></div>
+      <div className="stepper" aria-label="Tiến trình chấm công"><span className="done" /><span className="done" />{faceUsed && <span className="done" />}</div>
 
       <main className="presence-content">
         <div className="presence-branch"><span>⌖</span><div><small>ĐIỂM ĐANG XÁC MINH</small><strong>{precheck.branch.name}</strong><p>{precheck.branch.address}</p></div></div>
@@ -1248,6 +1534,7 @@ export function AttendancePrototype() {
   const [precheck, setPrecheck] = useState<PrecheckData | null>(null);
   const [location, setLocation] = useState<DeviceLocation | null>(null);
   const [faceProofId, setFaceProofId] = useState("");
+  const [faceStepSelected, setFaceStepSelected] = useState(false);
   const [checkInResult, setCheckInResult] = useState<CheckInResult | null>(null);
 
   useEffect(() => {
@@ -1288,12 +1575,13 @@ export function AttendancePrototype() {
     setUser(null);
     setPrecheck(null);
     setFaceProofId("");
+    setFaceStepSelected(false);
     setCheckInResult(null);
     setScreen("login");
   }
 
   async function completeCheckIn(presenceToken: string) {
-    if (!faceProofId) throw new Error("Bằng chứng khuôn mặt chưa sẵn sàng. Vui lòng quay lại xác thực.");
+    if ((precheck?.requirements.faceVerification || faceStepSelected) && !faceProofId) throw new Error("Bằng chứng khuôn mặt chưa sẵn sàng. Vui lòng quay lại xác thực.");
     const currentLocation = location ?? await readCurrentLocation(firebaseDemoMode());
     const result = await submitCheckIn(currentLocation, presenceToken, faceProofId);
     setCheckInResult(result);
@@ -1321,11 +1609,11 @@ export function AttendancePrototype() {
     <main className="prototype-shell">
       <aside className="prototype-context">
         <Brand />
-        <p className="phase-tag">PILOT · GIAI ĐOẠN 07</p>
+        <p className="phase-tag">PILOT · GIAI ĐOẠN 08</p>
         <h2>Chấm công rõ ràng.<br /><span>Bằng chứng đáng tin.</span></h2>
         <p className="context-lead">Nền móng trải nghiệm nhân viên cho hệ thống chấm công đa lớp Face AI, vị trí và hiện diện tại cơ sở.</p>
         <div className="phase-progress">
-          <div className="phase-progress__head"><span>Tiến độ bảo mật đa lớp</span><strong>07 / 08</strong></div>
+          <div className="phase-progress__head"><span>Tiến độ bảo mật đa lớp</span><strong>08 / 08</strong></div>
           <div className="phase-progress__bar"><span /></div>
         </div>
         <ul className="scope-list">
@@ -1333,7 +1621,8 @@ export function AttendancePrototype() {
           <li className="done"><span>✓</span><div><strong>Home ca làm</strong><small>Trạng thái sẵn sàng theo thời gian thực</small></div></li>
           <li className="done"><span>✓</span><div><strong>Pre-check đa lớp</strong><small>Functions, phân ca và dữ liệu cơ sở thật</small></div></li>
           <li className="done"><span>✓</span><div><strong>Face AI & Presence</strong><small>Embedding 128 chiều · liveness thử thách ngẫu nhiên</small></div></li>
-          <li className="active"><span>→</span><div><strong>Workforce Admin</strong><small>Nhân viên, sinh mật khẩu tạm và phân ca</small></div></li>
+          <li className="done"><span>✓</span><div><strong>Workforce Admin</strong><small>Nhân viên, sinh mật khẩu tạm và phân ca</small></div></li>
+          <li className="active"><span>→</span><div><strong>Pilot & báo cáo vận hành</strong><small>Policy theo chi nhánh · realtime · quyền riêng tư Face</small></div></li>
         </ul>
         <p className="prototype-note"><span>●</span> {demoMode ? "Bản prototype tương tác · Dữ liệu mô phỏng" : "Firebase production · Dữ liệu đồng bộ thật"}</p>
       </aside>
@@ -1344,11 +1633,12 @@ export function AttendancePrototype() {
           <div className="device-status"><span>{time}</span><span className="device-island" /><span>▮ ◒</span></div>
           {screen === "login" && <LoginScreen onLogin={handleLogin} />}
           {screen === "password" && user && <ChangeTemporaryPasswordScreen user={user} onChanged={(updatedUser) => { setUser(updatedUser); setScreen("home"); }} onLogout={() => void handleLogout()} />}
-          {screen === "home" && user && <HomeScreen time={time} date={date} user={user} precheck={precheck} onCheckIn={() => setScreen("precheck")} onManageDevices={() => setScreen("devices")} onLogout={() => void handleLogout()} />}
+          {screen === "home" && user && <HomeScreen time={time} date={date} user={user} precheck={precheck} onCheckIn={() => setScreen("precheck")} onManageDevices={() => setScreen("devices")} onProfile={() => setScreen("profile")} />}
+          {screen === "profile" && user && <ProfileScreen user={user} initialFaceStatus={precheck?.employee.faceEnrollmentStatus ?? null} onBack={() => setScreen("home")} onLogout={() => void handleLogout()} onWithdrawn={() => setPrecheck((current) => current ? { ...current, employee: { ...current.employee, faceEnrollmentStatus: "NOT_STARTED" } } : current)} />}
           {screen === "devices" && user?.canManageDevices && <DeviceAdminScreen user={user} onBack={() => setScreen("home")} />}
-          {screen === "precheck" && <PrecheckScreen onBack={() => setScreen("home")} onContinue={(data, currentLocation) => { setPrecheck(data); setLocation(currentLocation); setFaceProofId(""); setScreen("face"); }} />}
+          {screen === "precheck" && <PrecheckScreen onBack={() => setScreen("home")} onContinue={(data, currentLocation, useFace) => { setPrecheck(data); setLocation(currentLocation); setFaceProofId(""); setFaceStepSelected(useFace); setScreen(useFace ? "face" : "presence"); }} />}
           {screen === "face" && precheck && <FaceScreen precheck={precheck} onBack={() => { setFaceProofId(""); setScreen("precheck"); }} onComplete={async (proofId) => { setFaceProofId(proofId); setScreen("presence"); }} />}
-          {screen === "presence" && precheck && <PresenceScreen precheck={precheck} onBack={() => setScreen("face")} onVerified={completeCheckIn} />}
+          {screen === "presence" && precheck && <PresenceScreen precheck={precheck} faceUsed={faceStepSelected} onBack={() => setScreen(faceStepSelected ? "face" : "precheck")} onVerified={completeCheckIn} />}
           {screen === "success" && checkInResult && precheck && <SuccessScreen result={checkInResult} precheck={precheck} onStart={() => setScreen("session")} />}
           {screen === "session" && checkInResult && precheck && <SessionScreen result={checkInResult} precheck={precheck} onCheckOut={completeCheckOut} onHeartbeat={syncActiveSession} />}
           {toast && <div className="toast" role="status"><span>✓</span>{toast}</div>}

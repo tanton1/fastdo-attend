@@ -17,5 +17,10 @@ test("renders the FASTDO ATTEND prototype", async () => {
   assert.match(html, /FASTDO ATTEND/);
   assert.match(html, /Chào mừng quay lại/);
   assert.match(html, /Passkey \/ Face ID/);
+  assert.match(html, /PILOT\s*·\s*GIAI ĐOẠN 08/);
+  assert.match(html, /<html[^>]*\blang="vi"/i);
+  assert.match(html, /<title>FASTDO ATTEND[^<]*Pilot Control[^<]*Realtime<\/title>/i);
+  assert.match(html, /<meta[^>]*\bname="description"[^>]*\bcontent="[^"]*chấm công[^"]*"/i);
+  assert.match(html, /\/og-phase8\.png/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
 });

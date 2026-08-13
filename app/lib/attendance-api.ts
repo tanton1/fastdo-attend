@@ -1,7 +1,7 @@
 import { browserLocalPersistence, browserSessionPersistence, sendPasswordResetEmail, setPersistence, signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { httpsCallable } from "firebase/functions";
 import { firebaseDemoMode, getFirebaseServices } from "./firebase-client";
-import type { AdminDevice, AdminWorkforce, AttendanceUser, CheckInResult, CheckOutResult, CreateEmployeeInput, CreateEmployeeResult, DeviceLocation, DeviceReviewResult, DeviceStatus, EmployeeRole, FaceChallenge, FaceCompletion, FaceEvidence, FacePurpose, FaceSession, LocationHeartbeatResult, PrecheckData, PresenceChallenge, PresenceProof, WorkforceAssignment, WorkforceEmployee } from "./attendance-types";
+import type { AdminDevice, AdminWorkforce, AttendanceReport, AttendanceUser, CheckInResult, CheckOutResult, CreateEmployeeInput, CreateEmployeeResult, DeviceLocation, DeviceReviewResult, DeviceStatus, EmployeeRole, FaceChallenge, FaceCompletion, FaceConsentWithdrawal, FaceEvidence, FacePurpose, FaceSession, LocationHeartbeatResult, PilotPolicy, PilotPolicyUpdate, PrecheckData, PresenceChallenge, PresenceProof, RealtimeMonitor, WorkforceAssignment, WorkforceEmployee } from "./attendance-types";
 
 const demoUser: AttendanceUser = {
   uid: "demo_hai_au",
@@ -75,6 +75,52 @@ const demoWorkforce: AdminWorkforce = {
   shifts: [{ id: demoPrecheck.shift.id, branchId: demoPrecheck.branch.id, name: demoPrecheck.shift.name, startTime: demoPrecheck.shift.startTime, endTime: demoPrecheck.shift.endTime, isActive: true }],
   assignments: [],
 };
+
+const demoPilotPolicy: PilotPolicy = {
+  policies: [{
+    branchId: demoPrecheck.branch.id,
+    enforcementMode: "MONITOR",
+    faceMatchThreshold: 0.55,
+    retentionDays: 90,
+    rollout: { label: "Pilot Aura Thanh Khê", cohortPercent: 100, startsAt: new Date().toISOString().slice(0, 10), endsAt: null, notes: "Theo dõi Face AI trước khi bắt buộc." },
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    updatedBy: demoUser.uid,
+  }],
+};
+
+demoPrecheck.facePolicy = demoPilotPolicy.policies[0];
+
+function demoAttendanceReport(from: string, to: string): AttendanceReport {
+  const now = new Date();
+  const earlier = new Date(now.getTime() - 38 * 60_000);
+  return {
+    range: { startDate: from, endDate: to, branchId: null, timezone: "Asia/Ho_Chi_Minh" },
+    pageSummary: { returnedEvents: 2, checkIns: 2, checkOuts: 0, valid: 1, pendingReview: 1, rejected: 0, uniqueEmployees: 2, averageRiskScore: 35 },
+    rows: [
+      { id: "demo_report_1", userId: demoUser.uid, employeeName: demoUser.fullName, employeeCode: demoUser.employeeCode, branchId: demoPrecheck.branch.id, branchName: demoPrecheck.branch.name, type: "CHECK_IN", status: "VALID", serverTimestamp: earlier.toISOString(), distanceMeters: 12, locationAccuracy: 9, riskScore: 8, riskLevel: "LOW", faceVerified: true, presenceVerified: true, deviceVerified: true },
+      { id: "demo_report_2", userId: "demo_minh_anh", employeeName: "Minh Anh", employeeCode: "FD0241", branchId: demoPrecheck.branch.id, branchName: demoPrecheck.branch.name, type: "CHECK_IN", status: "PENDING_REVIEW", serverTimestamp: now.toISOString(), distanceMeters: 68, locationAccuracy: 16, riskScore: 62, riskLevel: "HIGH", faceVerified: false, presenceVerified: true, deviceVerified: true },
+    ],
+    truncated: false,
+    hasMore: false,
+    pagination: { limit: 500, returned: 2, hasMore: false },
+  };
+}
+
+function demoRealtimeMonitor(): RealtimeMonitor {
+  const now = new Date().toISOString();
+  return {
+    generatedAt: now,
+    pageSummary: { returnedActive: 2, insideGeofence: 1, outsideGeofence: 1, unknownGeofence: 0, staleHeartbeat: 0, highRisk: 0 },
+    rows: [
+      { sessionId: "demo_session_1", userId: demoUser.uid, employeeName: demoUser.fullName, employeeCode: demoUser.employeeCode, branchId: demoPrecheck.branch.id, branchName: demoPrecheck.branch.name, status: "ACTIVE", startedAt: new Date(Date.now() - 44 * 60_000).toISOString(), lastHeartbeatAt: now, insideGeofence: true, distanceMeters: 12, riskScore: 8, heartbeatStale: false },
+      { sessionId: "demo_session_2", userId: "demo_minh_anh", employeeName: "Minh Anh", employeeCode: "FD0241", branchId: demoPrecheck.branch.id, branchName: demoPrecheck.branch.name, status: "ACTIVE", startedAt: new Date(Date.now() - 31 * 60_000).toISOString(), lastHeartbeatAt: now, insideGeofence: false, distanceMeters: 146, riskScore: 58, heartbeatStale: false },
+    ],
+    truncated: false,
+    hasMore: false,
+    pagination: { limit: 100, returned: 2, hasMore: false },
+  };
+}
 
 function employeeEmail(identifier: string): string {
   const value = identifier.trim().toLowerCase();
@@ -393,6 +439,81 @@ export async function resetEmployeeFace(employeeId: string): Promise<{ employeeI
   }
 }
 
+export async function getPilotPolicy(branchId?: string): Promise<PilotPolicy> {
+  if (firebaseDemoMode()) {
+    await wait(350);
+    return { policies: demoPilotPolicy.policies.filter((policy) => !branchId || policy.branchId === branchId).map((policy) => ({ ...policy, rollout: { ...policy.rollout } })) };
+  }
+  const callable = httpsCallable<{ branchId?: string }, PilotPolicy>(getFirebaseServices().functions, "getPilotPolicy");
+  try {
+    return (await callable(branchId ? { branchId } : {})).data;
+  } catch (reason) {
+    throw new Error(firebaseErrorMessage(reason, "Không thể tải chính sách pilot."));
+  }
+}
+
+export async function updatePilotPolicy(input: PilotPolicyUpdate): Promise<PilotPolicy> {
+  if (firebaseDemoMode()) {
+    await wait(400);
+    demoPilotPolicy.policies = demoPilotPolicy.policies.map((policy) => policy.branchId === input.branchId ? {
+      ...policy,
+      ...input,
+      version: policy.version + 1,
+      updatedAt: new Date().toISOString(),
+      updatedBy: demoUser.uid,
+    } : policy);
+    return { policies: demoPilotPolicy.policies.map((policy) => ({ ...policy, rollout: { ...policy.rollout } })) };
+  }
+  const callable = httpsCallable<PilotPolicyUpdate, { policy: PilotPolicy["policies"][number] }>(getFirebaseServices().functions, "updatePilotPolicy");
+  try {
+    return { policies: [(await callable(input)).data.policy] };
+  } catch (reason) {
+    throw new Error(firebaseErrorMessage(reason, "Không thể cập nhật chính sách pilot."));
+  }
+}
+
+export async function getAttendanceReport(input: { startDate: string; endDate: string; branchId?: string; limit?: number }): Promise<AttendanceReport> {
+  if (firebaseDemoMode()) {
+    await wait(450);
+    return demoAttendanceReport(input.startDate, input.endDate);
+  }
+  const callable = httpsCallable<typeof input, AttendanceReport>(getFirebaseServices().functions, "getAttendanceReport");
+  try {
+    return (await callable(input)).data;
+  } catch (reason) {
+    throw new Error(firebaseErrorMessage(reason, "Không thể tải báo cáo chấm công."));
+  }
+}
+
+export async function getRealtimeMonitor(input: { branchId?: string; limit?: number } = {}): Promise<RealtimeMonitor> {
+  if (firebaseDemoMode()) {
+    await wait(350);
+    return demoRealtimeMonitor();
+  }
+  const callable = httpsCallable<{ branchId?: string; limit?: number }, RealtimeMonitor>(getFirebaseServices().functions, "getRealtimeMonitor");
+  try {
+    return (await callable(input)).data;
+  } catch (reason) {
+    throw new Error(firebaseErrorMessage(reason, "Không thể tải trạng thái chấm công realtime."));
+  }
+}
+
+export async function withdrawFaceConsent(): Promise<FaceConsentWithdrawal> {
+  if (firebaseDemoMode()) {
+    await wait(450);
+    demoPrecheck.employee.faceEnrollmentStatus = "NOT_STARTED";
+    const demoEmployee = demoWorkforce.employees.find((employee) => employee.id === demoUser.uid);
+    if (demoEmployee) demoEmployee.faceEnrollmentStatus = "NOT_STARTED";
+    return { withdrawn: true, faceEnrollmentStatus: "NOT_STARTED", revokedSessions: 1, revokedProofs: 1, withdrawnAt: new Date().toISOString() };
+  }
+  const callable = httpsCallable<undefined, FaceConsentWithdrawal>(getFirebaseServices().functions, "withdrawFaceConsent");
+  try {
+    return (await callable()).data;
+  } catch (reason) {
+    throw new Error(firebaseErrorMessage(reason, "Không thể rút đồng ý dữ liệu khuôn mặt."));
+  }
+}
+
 function browserPlatform(): string {
   if (typeof navigator === "undefined") return "web";
   const value = navigator.userAgent.toLowerCase();
@@ -437,7 +558,7 @@ export async function readCurrentLocation(fallbackToDemo = false): Promise<Devic
   });
 }
 
-export async function submitCheckIn(location: DeviceLocation, presenceToken: string, faceProofId: string): Promise<CheckInResult> {
+export async function submitCheckIn(location: DeviceLocation, presenceToken: string, faceProofId?: string): Promise<CheckInResult> {
   if (firebaseDemoMode()) {
     await wait(800);
     return {
@@ -457,8 +578,7 @@ export async function submitCheckIn(location: DeviceLocation, presenceToken: str
     deviceId: getOrCreateDeviceId(),
     location,
     presenceToken,
-    faceProofId,
-    faceSessionId: faceProofId,
+    ...(faceProofId ? { faceProofId, faceSessionId: faceProofId } : {}),
     clientTimestamp: new Date().toISOString(),
   });
   return response.data as CheckInResult;

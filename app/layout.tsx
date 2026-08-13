@@ -3,8 +3,8 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   metadataBase: new URL(process.env.SITE_URL ?? "http://localhost:3000"),
-  title: "FASTDO ATTEND — Chấm công thông minh",
-  description: "Bản thử nghiệm PWA chấm công đa lớp bằng khuôn mặt, vị trí và xác minh hiện diện tại cơ sở.",
+  title: "FASTDO ATTEND — Pilot Control & Realtime",
+  description: "PWA chấm công đa lớp với Face AI, chính sách pilot theo chi nhánh, báo cáo và giám sát realtime.",
   applicationName: "FASTDO ATTEND",
   manifest: "/manifest.webmanifest",
   icons: {
@@ -15,14 +15,14 @@ export const metadata: Metadata = {
     type: "website",
     locale: "vi_VN",
     title: "FASTDO ATTEND",
-    description: "Chấm công đa lớp bằng khuôn mặt, vị trí và xác minh hiện diện tại cơ sở.",
-    images: [{ url: "/og-phase7.png", width: 1731, height: 909, alt: "FASTDO ATTEND — Face AI, nhân sự và ca làm" }],
+    description: "Face AI, Pilot Control, báo cáo và giám sát chấm công realtime theo chi nhánh.",
+    images: [{ url: "/og-phase8.png", width: 1731, height: 909, alt: "FASTDO ATTEND — Pilot Control, Realtime và Privacy" }],
   },
   twitter: {
     card: "summary_large_image",
     title: "FASTDO ATTEND",
-    description: "Chấm công đa lớp bằng khuôn mặt, vị trí và xác minh hiện diện tại cơ sở.",
-    images: ["/og-phase7.png"],
+    description: "Face AI, Pilot Control, báo cáo và giám sát chấm công realtime theo chi nhánh.",
+    images: ["/og-phase8.png"],
   },
 };
 

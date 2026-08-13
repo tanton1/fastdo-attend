@@ -21,6 +21,16 @@ const {
   normalizeEmployeeCode,
   normalizeEmployeeEmail,
 } = require("../lib/domain/workforce.js");
+const {
+  isFaceEnforcementMode,
+  isSafeFaceMatchThreshold,
+  isValidFaceRetentionDays,
+  normalizePilotRollout,
+  retentionExpiryMillis,
+  resolveEffectiveFacePolicy,
+  safeFaceTelemetry,
+} = require("../lib/domain/pilot.js");
+const { boundedPage, zonedDateBoundaryUtc } = require("../lib/domain/report.js");
 
 test("distance is zero for the same coordinate", () => {
   assert.equal(distanceInMeters({ latitude: 16.0678, longitude: 108.1895 }, { latitude: 16.0678, longitude: 108.1895 }), 0);
@@ -150,4 +160,76 @@ test("workforce input helpers normalize identifiers and generate strong temporar
   assert.equal(canManageWorkforceRole("MANAGER", "HR"), false);
   assert.equal(canManageWorkforceRole("HR", "COMPANY_ADMIN"), false);
   assert.equal(canManageWorkforceRole("COMPANY_ADMIN", "SUPER_ADMIN"), false);
+});
+
+test("pilot policy validates security and retention boundaries", () => {
+  assert.equal(isFaceEnforcementMode("OFF"), true);
+  assert.equal(isFaceEnforcementMode("OPTIONAL"), false);
+  assert.equal(isSafeFaceMatchThreshold(0.35), true);
+  assert.equal(isSafeFaceMatchThreshold(0.65), true);
+  assert.equal(isSafeFaceMatchThreshold(0.651), false);
+  assert.equal(isValidFaceRetentionDays(1), true);
+  assert.equal(isValidFaceRetentionDays(365), true);
+  assert.equal(isValidFaceRetentionDays(0), false);
+  assert.equal(isValidFaceRetentionDays(12.5), false);
+  assert.deepEqual(normalizePilotRollout({
+    label: "  Pilot   Da Nang ", cohortPercent: 25,
+    startsAt: "2026-08-13T00:00:00+07:00", endsAt: null, notes: " safe metadata ",
+  }), {
+    label: "Pilot Da Nang", cohortPercent: 25,
+    startsAt: "2026-08-12T17:00:00.000Z", endsAt: null, notes: "safe metadata",
+  });
+  assert.equal(normalizePilotRollout({ label: "Bad", cohortPercent: 0 }), null);
+});
+
+test("rollout policy is deterministic and respects windows and cohorts", () => {
+  const base = {
+    enforcementMode: "REQUIRED",
+    cohortPercent: 50,
+    startsAtMillis: 1_000,
+    endsAtMillis: 5_000,
+    identity: "company:branch:user-1",
+  };
+  const first = resolveEffectiveFacePolicy({ ...base, nowMillis: 2_000 });
+  const second = resolveEffectiveFacePolicy({ ...base, nowMillis: 2_000 });
+  assert.deepEqual(first, second);
+  assert.equal(first.effectiveEnforcementMode, first.inCohort ? "REQUIRED" : "MONITOR");
+  assert.equal(resolveEffectiveFacePolicy({ ...base, nowMillis: 999 }).effectiveEnforcementMode, "MONITOR");
+  assert.equal(resolveEffectiveFacePolicy({ ...base, enforcementMode: "MONITOR", nowMillis: 999 }).effectiveEnforcementMode, "OFF");
+  assert.equal(resolveEffectiveFacePolicy({ ...base, enforcementMode: "OFF", nowMillis: 2_000 }).effectiveEnforcementMode, "OFF");
+});
+
+test("face telemetry schema cannot carry biometric payloads or tokens", () => {
+  const telemetry = safeFaceTelemetry({
+    companyId: "company", branchId: "branch", eventType: "SESSION_COMPLETED",
+    purpose: "VERIFY", enforcementMode: "MONITOR", outcome: "VERIFIED",
+    matchScore: 0.812345, threshold: 0.55, livenessPassed: true,
+  });
+  assert.equal(telemetry.matchScore, 0.8123);
+  assert.deepEqual(Object.keys(telemetry).sort(), [
+    "branchId", "companyId", "enforcementMode", "eventType", "livenessPassed",
+    "matchScore", "outcome", "purpose", "threshold",
+  ]);
+  assert.equal("descriptor" in telemetry, false);
+  assert.equal("token" in telemetry, false);
+});
+
+test("report boundaries use branch timezone rather than UTC calendar days", () => {
+  assert.equal(zonedDateBoundaryUtc("2026-08-13", "Asia/Ho_Chi_Minh").toISOString(), "2026-08-12T17:00:00.000Z");
+  assert.equal(zonedDateBoundaryUtc("2026-08-13", "Asia/Ho_Chi_Minh", true).toISOString(), "2026-08-13T16:59:59.999Z");
+});
+
+test("bounded report pages expose truncation without claiming a global total", () => {
+  assert.deepEqual(boundedPage([1, 2, 3], 2), { rows: [1, 2], hasMore: true });
+  assert.deepEqual(boundedPage([1, 2], 2), { rows: [1, 2], hasMore: false });
+  assert.throws(() => boundedPage([1], 0));
+});
+
+test("retention backfill only adds or shortens expiry and never extends it", () => {
+  const day = 24 * 60 * 60 * 1000;
+  const enrolledAt = Date.UTC(2026, 7, 1);
+  assert.equal(retentionExpiryMillis(enrolledAt, 90), enrolledAt + 90 * day);
+  assert.equal(retentionExpiryMillis(enrolledAt, 30, enrolledAt + 90 * day), enrolledAt + 30 * day);
+  assert.equal(retentionExpiryMillis(enrolledAt, 365, enrolledAt + 90 * day), enrolledAt + 90 * day);
+  assert.throws(() => retentionExpiryMillis(enrolledAt, 0));
 });

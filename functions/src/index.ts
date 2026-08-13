@@ -6,7 +6,19 @@ import { HttpsError, onCall } from "firebase-functions/v2/https";
 import { setGlobalOptions } from "firebase-functions/v2/options";
 import { distanceInMeters } from "./domain/geo";
 import { calculateAttendanceRisk } from "./domain/risk";
+import { boundedPage, zonedDateBoundaryUtc } from "./domain/report";
 import { deviceCanCheckIn, sanitizePlatform } from "./domain/device";
+import {
+  faceIsRequired,
+  faceMayBeCollected,
+  isFaceEnforcementMode,
+  isSafeFaceMatchThreshold,
+  isValidFaceRetentionDays,
+  normalizePilotRollout,
+  retentionExpiryMillis,
+  resolveEffectiveFacePolicy,
+  safeFaceTelemetry,
+} from "./domain/pilot";
 import {
   FACE_CONSENT_VERSION,
   FACE_MATCH_DISTANCE_THRESHOLD,
@@ -28,6 +40,7 @@ import type {
   FaceProofDocument,
   FacePurpose,
   FaceSessionDocument,
+  PilotPolicyDocument,
   PresenceChallengeDocument,
   PresenceProofDocument,
   ShiftAssignmentDocument,
@@ -45,8 +58,10 @@ import {
 } from "./domain/workforce";
 import { buildAuditLogDocument, writeAuditLog } from "./services/audit";
 import { MANAGER_ROLES, loadAttendanceContext, loadEmployeeContext, loadManagerContext, requireUserId } from "./services/context";
+import type { EmployeeContext } from "./services/context";
 import { publicDeviceStatus, readOwnedDevice, registerOrTouchDevice, requireDeviceId } from "./services/devices";
 import type { DeviceRegistrationInput } from "./services/devices";
+import { defaultPilotPolicy, loadPilotPolicy, pilotPolicyDocumentId, pilotPolicyFromData, publicPilotPolicy } from "./services/pilot-policy";
 import { enforceRateLimit } from "./services/rate-limit";
 
 initializeApp();
@@ -134,6 +149,26 @@ interface ChangeTemporaryPasswordInput {
   newPassword: string;
 }
 
+interface PilotPolicyInput {
+  branchId: string;
+  enforcementMode: PilotPolicyDocument["enforcementMode"];
+  faceMatchThreshold: number;
+  retentionDays: number;
+  rollout: unknown;
+}
+
+interface AttendanceReportInput {
+  startDate: string;
+  endDate: string;
+  branchId?: string;
+  limit?: number;
+}
+
+interface RealtimeMonitorInput {
+  branchId?: string;
+  limit?: number;
+}
+
 function presenceSigningSecret(): string {
   const secret = process.env.PRESENCE_SIGNING_KEY;
   if (!secret || secret.length < 32) throw new HttpsError("internal", "Khóa ký QR hiện diện chưa được cấu hình.");
@@ -159,6 +194,8 @@ function requireAttendanceInput(input: AttendanceInput): void {
 }
 
 const WORKFORCE_ROLES: EmployeeRole[] = ["SUPER_ADMIN", "COMPANY_ADMIN", "HR", "MANAGER"];
+const TENANT_WIDE_REPORT_ROLES: EmployeeRole[] = ["SUPER_ADMIN", "COMPANY_ADMIN", "HR"];
+const PILOT_POLICY_ADMIN_ROLES: EmployeeRole[] = ["SUPER_ADMIN", "COMPANY_ADMIN"];
 
 function assertWorkforceAccess(role: EmployeeRole): void {
   if (!WORKFORCE_ROLES.includes(role)) throw new HttpsError("permission-denied", "Bạn không có quyền quản lý nhân sự.");
@@ -185,6 +222,50 @@ function sanitizeBranchIds(value: unknown): string[] {
 
 function timestampToIso(value: unknown): string | null {
   return value instanceof Timestamp ? value.toDate().toISOString() : null;
+}
+
+function sanitizeOptionalBranchId(value: unknown): string | null {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{2,100}$/.test(value.trim())) {
+    throw new HttpsError("invalid-argument", "Chi nhánh không hợp lệ.");
+  }
+  return value.trim();
+}
+
+async function assertBranchAccess(context: EmployeeContext, branchId: string, tenantWide = false): Promise<BranchDocument> {
+  const snapshot = await getFirestore().doc(`branches/${branchId}`).get();
+  if (!snapshot.exists) throw new HttpsError("not-found", "Không tìm thấy chi nhánh.");
+  const branch = snapshot.data() as BranchDocument;
+  if (branch.companyId !== context.employee.companyId) {
+    throw new HttpsError("permission-denied", "Chi nhánh không thuộc doanh nghiệp của bạn.");
+  }
+  if (!tenantWide && !TENANT_WIDE_REPORT_ROLES.includes(context.employee.role) && !context.employee.branchIds?.includes(branchId)) {
+    throw new HttpsError("permission-denied", "Bạn không có quyền truy cập chi nhánh này.");
+  }
+  return branch;
+}
+
+function faceTelemetryExpiry(now: Timestamp, retentionDays: number): Timestamp {
+  return Timestamp.fromMillis(now.toMillis() + retentionDays * 24 * 60 * 60 * 1000);
+}
+
+function faceProfileExpiry(profile: FaceProfileDocument, retentionDays: number): Timestamp {
+  return Timestamp.fromMillis(retentionExpiryMillis(
+    profile.enrolledAt.toMillis(),
+    retentionDays,
+    profile.retentionExpiresAt?.toMillis(),
+  ));
+}
+
+function effectiveFacePolicy(policy: PilotPolicyDocument, userId: string, now: Timestamp) {
+  return resolveEffectiveFacePolicy({
+    enforcementMode: policy.enforcementMode,
+    cohortPercent: policy.rollout.cohortPercent,
+    startsAtMillis: policy.rollout.startsAt?.toMillis() ?? null,
+    endsAtMillis: policy.rollout.endsAt?.toMillis() ?? null,
+    identity: `${policy.companyId}:${policy.branchId}:${userId}`,
+    nowMillis: now.toMillis(),
+  });
 }
 
 async function validateAssignmentScope(
@@ -390,6 +471,292 @@ export const getAdminWorkforce = onCall(callableOptions, async (request) => {
     branches: branchesSnapshot.docs.map((snapshot) => ({ id: snapshot.id, ...snapshot.data() as BranchDocument })),
     shifts: shiftsSnapshot.docs.map((snapshot) => ({ id: snapshot.id, ...snapshot.data() as ShiftDocument })),
     assignments,
+  };
+});
+
+export const getPilotPolicy = onCall<{ branchId?: string }>(callableOptions, async (request) => {
+  const actorId = requireUserId(request);
+  const context = await loadManagerContext(actorId);
+  assertWorkforceAccess(context.employee.role);
+  await enforceRateLimit(actorId, "getPilotPolicy", 30);
+  const requestedBranchId = sanitizeOptionalBranchId(request.data?.branchId);
+  const db = getFirestore();
+  let branches: Array<{ id: string; data: BranchDocument }>;
+  if (requestedBranchId) {
+    const branch = await assertBranchAccess(context, requestedBranchId);
+    branches = [{ id: requestedBranchId, data: branch }];
+  } else {
+    const snapshot = await db.collection("branches")
+      .where("companyId", "==", context.employee.companyId)
+      .limit(100)
+      .get();
+    branches = snapshot.docs
+      .map((document) => ({ id: document.id, data: document.data() as BranchDocument }))
+      .filter(({ id }) => TENANT_WIDE_REPORT_ROLES.includes(context.employee.role) || context.employee.branchIds?.includes(id));
+  }
+  const policies = await Promise.all(branches.map(({ id }) => loadPilotPolicy(context.employee.companyId, id)));
+  return { policies: policies.map(publicPilotPolicy) };
+});
+
+export const updatePilotPolicy = onCall<PilotPolicyInput>(callableOptions, async (request) => {
+  const actorId = requireUserId(request);
+  const context = await loadManagerContext(actorId);
+  if (!PILOT_POLICY_ADMIN_ROLES.includes(context.employee.role)) {
+    throw new HttpsError("permission-denied", "Chỉ quản trị doanh nghiệp mới được thay đổi chính sách pilot.");
+  }
+  await enforceRateLimit(actorId, "updatePilotPolicy", 20, 300);
+  const branchId = sanitizeOptionalBranchId(request.data?.branchId);
+  if (!branchId) throw new HttpsError("invalid-argument", "Cần chọn chi nhánh áp dụng chính sách.");
+  await assertBranchAccess(context, branchId, true);
+  if (!isFaceEnforcementMode(request.data?.enforcementMode)) {
+    throw new HttpsError("invalid-argument", "Chế độ Face phải là OFF, MONITOR hoặc REQUIRED.");
+  }
+  if (!isSafeFaceMatchThreshold(request.data?.faceMatchThreshold)) {
+    throw new HttpsError("invalid-argument", "Ngưỡng Face phải nằm trong khoảng an toàn 0.35–0.65.");
+  }
+  if (!isValidFaceRetentionDays(request.data?.retentionDays)) {
+    throw new HttpsError("invalid-argument", "Thời hạn lưu dữ liệu Face phải từ 1 đến 365 ngày.");
+  }
+  const rollout = normalizePilotRollout(request.data?.rollout);
+  if (!rollout) throw new HttpsError("invalid-argument", "Thông tin rollout pilot không hợp lệ.");
+  const db = getFirestore();
+  const policyRef = db.doc(`pilotPolicies/${pilotPolicyDocumentId(context.employee.companyId, branchId)}`);
+  const now = Timestamp.now();
+  const updated = await db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(policyRef);
+    const previous = snapshot.exists
+      ? snapshot.data() as PilotPolicyDocument
+      : defaultPilotPolicy(context.employee.companyId, branchId);
+    const policy: PilotPolicyDocument = {
+      companyId: context.employee.companyId,
+      branchId,
+      enforcementMode: request.data.enforcementMode,
+      faceMatchThreshold: request.data.faceMatchThreshold,
+      retentionDays: request.data.retentionDays,
+      rollout: {
+        label: rollout.label,
+        cohortPercent: rollout.cohortPercent,
+        startsAt: rollout.startsAt ? Timestamp.fromDate(new Date(rollout.startsAt)) : null,
+        endsAt: rollout.endsAt ? Timestamp.fromDate(new Date(rollout.endsAt)) : null,
+        notes: rollout.notes,
+      },
+      version: Math.max(0, Number(previous.version) || 0) + 1,
+      updatedAt: now,
+      updatedBy: actorId,
+    };
+    transaction.set(policyRef, policy);
+    transaction.create(db.collection("auditLogs").doc(), buildAuditLogDocument(request, context, {
+      action: "PILOT_POLICY_UPDATED",
+      targetType: "BRANCH",
+      targetId: branchId,
+      metadata: {
+        previousMode: previous.enforcementMode,
+        enforcementMode: policy.enforcementMode,
+        faceMatchThreshold: policy.faceMatchThreshold,
+        retentionDays: policy.retentionDays,
+        version: policy.version,
+      },
+    }));
+    return policy;
+  });
+  return { policy: publicPilotPolicy(updated) };
+});
+
+export const getAttendanceReport = onCall<AttendanceReportInput>(callableOptions, async (request) => {
+  const actorId = requireUserId(request);
+  const context = await loadManagerContext(actorId);
+  assertWorkforceAccess(context.employee.role);
+  await enforceRateLimit(actorId, "getAttendanceReport", 20);
+  if (!isIsoDateOnly(request.data?.startDate) || !isIsoDateOnly(request.data?.endDate)) {
+    throw new HttpsError("invalid-argument", "Khoảng ngày báo cáo không hợp lệ.");
+  }
+  const branchId = sanitizeOptionalBranchId(request.data?.branchId);
+  const reportBranch = branchId ? await assertBranchAccess(context, branchId) : null;
+  const companySnapshot = reportBranch ? null : await getFirestore().doc(`companies/${context.employee.companyId}`).get();
+  const companyTimezone = typeof companySnapshot?.data()?.timezone === "string" ? String(companySnapshot.data()?.timezone) : "Asia/Ho_Chi_Minh";
+  const timezone = reportBranch?.timezone || companyTimezone;
+  let start: Timestamp;
+  let end: Timestamp;
+  try {
+    start = Timestamp.fromDate(zonedDateBoundaryUtc(request.data.startDate, timezone));
+    end = Timestamp.fromDate(zonedDateBoundaryUtc(request.data.endDate, timezone, true));
+  } catch {
+    throw new HttpsError("failed-precondition", "Múi giờ báo cáo của doanh nghiệp hoặc chi nhánh không hợp lệ.");
+  }
+  if (end.toMillis() < start.toMillis() || end.toMillis() - start.toMillis() > 31 * 24 * 60 * 60 * 1000) {
+    throw new HttpsError("invalid-argument", "Báo cáo chỉ hỗ trợ tối đa 31 ngày.");
+  }
+  const limit = Number.isInteger(request.data?.limit) ? Math.max(1, Math.min(Number(request.data.limit), 500)) : 200;
+  const scopedBranchIds = TENANT_WIDE_REPORT_ROLES.includes(context.employee.role)
+    ? null
+    : context.employee.branchIds ?? [];
+  if (!branchId && scopedBranchIds && scopedBranchIds.length === 0) {
+    return {
+      range: { startDate: request.data.startDate, endDate: request.data.endDate, branchId: null, timezone },
+      pageSummary: { returnedEvents: 0, checkIns: 0, checkOuts: 0, valid: 0, pendingReview: 0, rejected: 0, uniqueEmployees: 0, averageRiskScore: 0 },
+      rows: [],
+      truncated: false,
+      hasMore: false,
+      pagination: { limit, returned: 0, hasMore: false },
+    };
+  }
+  const db = getFirestore();
+  const queryBranchIds = branchId ? [branchId] : scopedBranchIds;
+  const makeQuery = (scopeBranchId: string | null) => {
+    let query = db.collection("attendanceEvents")
+      .where("companyId", "==", context.employee.companyId)
+      .where("serverTimestamp", ">=", start)
+      .where("serverTimestamp", "<=", end);
+    if (scopeBranchId) query = query.where("branchId", "==", scopeBranchId);
+    return query.orderBy("serverTimestamp", "desc").limit(limit + 1).get();
+  };
+  const snapshots = queryBranchIds
+    ? await Promise.all(queryBranchIds.slice(0, 20).map((id) => makeQuery(id)))
+    : [await makeQuery(null)];
+  const eventDocuments = snapshots.flatMap((snapshot) => snapshot.docs)
+    .sort((left, right) => Number(right.data().serverTimestamp?.toMillis?.() ?? 0) - Number(left.data().serverTimestamp?.toMillis?.() ?? 0));
+  const eventPage = boundedPage(eventDocuments, limit);
+  const truncated = eventPage.hasMore;
+  const selectedEvents = eventPage.rows;
+  const employeeIds = [...new Set(selectedEvents.map((event) => String(event.data().userId ?? "")).filter(Boolean))];
+  const branchIds = [...new Set(selectedEvents.map((event) => String(event.data().branchId ?? "")).filter(Boolean))];
+  const [employeeSnapshots, branchSnapshots] = await Promise.all([
+    employeeIds.length ? db.getAll(...employeeIds.map((id) => db.doc(`employees/${id}`))) : [],
+    branchIds.length ? db.getAll(...branchIds.map((id) => db.doc(`branches/${id}`))) : [],
+  ]);
+  const employees = new Map(employeeSnapshots.filter((snapshot) => snapshot.exists)
+    .map((snapshot) => [snapshot.id, snapshot.data() as EmployeeDocument]));
+  const branches = new Map(branchSnapshots.filter((snapshot) => snapshot.exists)
+    .map((snapshot) => [snapshot.id, snapshot.data() as BranchDocument]));
+  const rows = selectedEvents.map((snapshot) => {
+    const event = snapshot.data();
+    const employee = employees.get(String(event.userId));
+    const branch = branches.get(String(event.branchId));
+    return {
+      id: snapshot.id,
+      userId: String(event.userId ?? ""),
+      employeeName: employee?.fullName ?? "Nhân viên",
+      employeeCode: employee?.employeeCode ?? "—",
+      branchId: String(event.branchId ?? ""),
+      branchName: branch?.name ?? "Chi nhánh",
+      type: String(event.type ?? "UNKNOWN"),
+      status: String(event.status ?? "UNKNOWN"),
+      serverTimestamp: timestampToIso(event.serverTimestamp),
+      distanceMeters: Number.isFinite(event.distanceToBranchMeters) ? Math.round(event.distanceToBranchMeters) : null,
+      locationAccuracy: Number.isFinite(event.locationAccuracy) ? Math.round(event.locationAccuracy) : null,
+      riskScore: Number.isFinite(event.riskScore) ? event.riskScore : 0,
+      riskLevel: typeof event.riskLevel === "string" ? event.riskLevel : null,
+      faceVerified: event.faceVerified === true,
+      presenceVerified: event.presenceVerified === true,
+      deviceVerified: event.deviceVerified === true,
+    };
+  });
+  const riskTotal = rows.reduce((sum, row) => sum + row.riskScore, 0);
+  const pageSummary = {
+    returnedEvents: rows.length,
+    checkIns: rows.filter((row) => row.type === "CHECK_IN").length,
+    checkOuts: rows.filter((row) => row.type === "CHECK_OUT").length,
+    valid: rows.filter((row) => row.status === "VALID").length,
+    pendingReview: rows.filter((row) => row.status === "PENDING_REVIEW").length,
+    rejected: rows.filter((row) => row.status === "REJECTED").length,
+    uniqueEmployees: new Set(rows.map((row) => row.userId)).size,
+    averageRiskScore: rows.length ? Math.round(riskTotal / rows.length * 10) / 10 : 0,
+  };
+  return {
+    range: { startDate: request.data.startDate, endDate: request.data.endDate, branchId, timezone },
+    pageSummary,
+    rows,
+    truncated,
+    hasMore: truncated,
+    pagination: { limit, returned: rows.length, hasMore: truncated },
+  };
+});
+
+export const getRealtimeMonitor = onCall<RealtimeMonitorInput>(callableOptions, async (request) => {
+  const actorId = requireUserId(request);
+  const context = await loadManagerContext(actorId);
+  assertWorkforceAccess(context.employee.role);
+  await enforceRateLimit(actorId, "getRealtimeMonitor", 30);
+  const branchId = sanitizeOptionalBranchId(request.data?.branchId);
+  if (branchId) await assertBranchAccess(context, branchId);
+  const limit = Number.isInteger(request.data?.limit) ? Math.max(1, Math.min(Number(request.data.limit), 100)) : 50;
+  const scopedBranchIds = TENANT_WIDE_REPORT_ROLES.includes(context.employee.role)
+    ? null
+    : context.employee.branchIds ?? [];
+  const queryBranchIds = branchId ? [branchId] : scopedBranchIds;
+  if (queryBranchIds && queryBranchIds.length === 0) {
+    return {
+      generatedAt: new Date().toISOString(),
+      pageSummary: { returnedActive: 0, insideGeofence: 0, outsideGeofence: 0, unknownGeofence: 0, staleHeartbeat: 0, highRisk: 0 },
+      rows: [],
+      truncated: false,
+      hasMore: false,
+      pagination: { limit, returned: 0, hasMore: false },
+    };
+  }
+  const db = getFirestore();
+  const makeQuery = (scopeBranchId: string | null) => {
+    let query = db.collection("workSessions")
+      .where("companyId", "==", context.employee.companyId)
+      .where("status", "==", "ACTIVE");
+    if (scopeBranchId) query = query.where("branchId", "==", scopeBranchId);
+    return query.orderBy("startedAt", "desc").limit(limit + 1).get();
+  };
+  const snapshots = queryBranchIds
+    ? await Promise.all(queryBranchIds.slice(0, 20).map((id) => makeQuery(id)))
+    : [await makeQuery(null)];
+  const sessionDocuments = snapshots.flatMap((snapshot) => snapshot.docs)
+    .sort((left, right) => Number(right.data().startedAt?.toMillis?.() ?? 0) - Number(left.data().startedAt?.toMillis?.() ?? 0));
+  const sessionPage = boundedPage(sessionDocuments, limit);
+  const hasMore = sessionPage.hasMore;
+  const sessions = sessionPage.rows;
+  const employeeIds = [...new Set(sessions.map((session) => String(session.data().userId ?? "")).filter(Boolean))];
+  const branchIds = [...new Set(sessions.map((session) => String(session.data().branchId ?? "")).filter(Boolean))];
+  const [employeeSnapshots, branchSnapshots] = await Promise.all([
+    employeeIds.length ? db.getAll(...employeeIds.map((id) => db.doc(`employees/${id}`))) : [],
+    branchIds.length ? db.getAll(...branchIds.map((id) => db.doc(`branches/${id}`))) : [],
+  ]);
+  const employees = new Map(employeeSnapshots.filter((snapshot) => snapshot.exists)
+    .map((snapshot) => [snapshot.id, snapshot.data() as EmployeeDocument]));
+  const branches = new Map(branchSnapshots.filter((snapshot) => snapshot.exists)
+    .map((snapshot) => [snapshot.id, snapshot.data() as BranchDocument]));
+  const staleBoundary = Date.now() - 5 * 60 * 1000;
+  const rows = sessions.map((snapshot) => {
+    const session = snapshot.data();
+    const employee = employees.get(String(session.userId));
+    const branch = branches.get(String(session.branchId));
+    const heartbeatMillis = Number(session.lastHeartbeatAt?.toMillis?.() ?? 0);
+    return {
+      sessionId: snapshot.id,
+      userId: String(session.userId ?? ""),
+      employeeName: employee?.fullName ?? "Nhân viên",
+      employeeCode: employee?.employeeCode ?? "—",
+      branchId: String(session.branchId ?? ""),
+      branchName: branch?.name ?? "Chi nhánh",
+      status: "ACTIVE",
+      startedAt: timestampToIso(session.startedAt),
+      lastHeartbeatAt: timestampToIso(session.lastHeartbeatAt),
+      insideGeofence: typeof session.insideGeofence === "boolean" ? session.insideGeofence : null,
+      distanceMeters: Number.isFinite(session.lastDistanceMeters) ? Math.round(session.lastDistanceMeters) : null,
+      riskScore: Number.isFinite(session.riskScore) ? session.riskScore : 0,
+      heartbeatStale: heartbeatMillis === 0 || heartbeatMillis < staleBoundary,
+    };
+  });
+  const pageSummary = {
+    returnedActive: rows.length,
+    insideGeofence: rows.filter((row) => row.insideGeofence === true).length,
+    outsideGeofence: rows.filter((row) => row.insideGeofence === false).length,
+    unknownGeofence: rows.filter((row) => row.insideGeofence === null).length,
+    staleHeartbeat: rows.filter((row) => row.heartbeatStale).length,
+    highRisk: rows.filter((row) => row.riskScore >= 60).length,
+  };
+  return {
+    generatedAt: new Date().toISOString(),
+    pageSummary,
+    rows,
+    truncated: hasMore,
+    hasMore,
+    pagination: { limit, returned: rows.length, hasMore },
   };
 });
 
@@ -683,6 +1050,66 @@ export const resetEmployeeFace = onCall<{ employeeId: string }>(callableOptions,
   return { userId: employeeId, faceEnrollmentStatus: "NOT_STARTED" };
 });
 
+export const withdrawFaceConsent = onCall(callableOptions, async (request) => {
+  const userId = requireUserId(request);
+  const context = await loadEmployeeContext(userId);
+  await enforceRateLimit(userId, "withdrawFaceConsent", 3, 3600);
+  const db = getFirestore();
+  const employeeRef = db.doc(`employees/${userId}`);
+  const profileRef = db.doc(`faceProfiles/${userId}`);
+  const tombstoneRef = db.collection("biometricConsentTombstones").doc();
+  const now = Timestamp.now();
+  const result = await db.runTransaction(async (transaction) => {
+    const [profile, activeSessions, unusedProofs] = await Promise.all([
+      transaction.get(profileRef),
+      transaction.get(db.collection("faceSessions").where("userId", "==", userId).where("status", "==", "ACTIVE")),
+      transaction.get(db.collection("faceProofs").where("userId", "==", userId).where("usedAt", "==", null)),
+    ]);
+    if (activeSessions.size + unusedProofs.size > 450) {
+      throw new HttpsError("resource-exhausted", "Có quá nhiều phiên Face đang chờ; vui lòng liên hệ quản trị hệ thống.");
+    }
+    if (profile.exists) transaction.delete(profileRef);
+    for (const session of activeSessions.docs) {
+      transaction.update(session.ref, { status: "FAILED", usedAt: now, outcome: "CONSENT_WITHDRAWN" });
+    }
+    for (const proof of unusedProofs.docs) transaction.delete(proof.ref);
+    transaction.update(employeeRef, {
+      faceEnrollmentStatus: "NOT_STARTED",
+      faceConsentWithdrawnAt: now,
+      updatedAt: now,
+    });
+    transaction.create(tombstoneRef, {
+      companyId: context.employee.companyId,
+      userId,
+      consentVersion: profile.exists ? String(profile.data()?.consentVersion ?? FACE_CONSENT_VERSION) : null,
+      profileDeleted: profile.exists,
+      revokedSessions: activeSessions.size,
+      revokedProofs: unusedProofs.size,
+      withdrawnAt: now,
+      // Compliance tombstone intentionally contains no image, descriptor, token or device identifier.
+      immutable: true,
+    });
+    transaction.create(db.collection("auditLogs").doc(), buildAuditLogDocument(request, context, {
+      action: "FACE_CONSENT_WITHDRAWN",
+      targetType: "EMPLOYEE",
+      targetId: userId,
+      metadata: {
+        profileDeleted: profile.exists,
+        revokedSessions: activeSessions.size,
+        revokedProofs: unusedProofs.size,
+      },
+    }));
+    return { revokedSessions: activeSessions.size, revokedProofs: unusedProofs.size };
+  });
+  return {
+    withdrawn: true,
+    faceEnrollmentStatus: "NOT_STARTED" as const,
+    revokedSessions: result.revokedSessions,
+    revokedProofs: result.revokedProofs,
+    withdrawnAt: now.toDate().toISOString(),
+  };
+});
+
 export const createPresenceChallenge = onCall<PresenceChallengeInput>(presenceCallableOptions, async (request) => {
   const userId = requireUserId(request);
   const context = await loadManagerContext(userId);
@@ -822,6 +1249,11 @@ export const startFaceSession = onCall<StartFaceSessionInput>(callableOptions, a
   const userId = requireUserId(request);
   const context = await loadAttendanceContext(userId);
   await enforceRateLimit(userId, "startFaceSession", 8);
+  const policy = await loadPilotPolicy(context.employee.companyId, context.branchId);
+  const policyEvaluation = effectiveFacePolicy(policy, userId, Timestamp.now());
+  if (!faceMayBeCollected(policyEvaluation.effectiveEnforcementMode)) {
+    throw new HttpsError("failed-precondition", "Chính sách pilot của chi nhánh đang tắt việc thu thập dữ liệu Face.");
+  }
   const deviceId = requireDeviceId(request.data?.deviceId);
   if (!(["ENROLL", "VERIFY"] as FacePurpose[]).includes(request.data?.purpose)) {
     throw new HttpsError("invalid-argument", "Mục đích xác thực khuôn mặt không hợp lệ.");
@@ -830,15 +1262,28 @@ export const startFaceSession = onCall<StartFaceSessionInput>(callableOptions, a
   if (!device || !deviceCanCheckIn(device.status, device.isBlocked)) {
     throw new HttpsError("failed-precondition", "Thiết bị phải được phê duyệt trước khi xác thực khuôn mặt.");
   }
-  if (request.data.purpose === "VERIFY" && context.employee.faceEnrollmentStatus !== "APPROVED") {
-    throw new HttpsError("failed-precondition", "Bạn cần đăng ký khuôn mặt trước khi xác minh.");
-  }
-  if (request.data.purpose === "ENROLL" && context.employee.faceEnrollmentStatus === "APPROVED") {
-    throw new HttpsError("already-exists", "Khuôn mặt đã được đăng ký. Quản trị viên phải đặt lại hồ sơ trước khi đăng ký mới.");
-  }
-
   const db = getFirestore();
   const now = Timestamp.now();
+  const profileRef = db.doc(`faceProfiles/${userId}`);
+  const profileSnapshot = await profileRef.get();
+  const profile = profileSnapshot.exists ? profileSnapshot.data() as FaceProfileDocument : null;
+  const profileExpiry = profile ? faceProfileExpiry(profile, policy.retentionDays) : null;
+  const profileExpired = Boolean(profileExpiry && profileExpiry.toMillis() <= now.toMillis());
+  const usableProfile = Boolean(profile && !profileExpired);
+  if (context.employee.faceEnrollmentStatus === "APPROVED" && !usableProfile) {
+    const repair = db.batch();
+    if (profileSnapshot.exists) repair.delete(profileRef);
+    repair.update(db.doc(`employees/${userId}`), { faceEnrollmentStatus: "NOT_STARTED", faceRetentionExpiredAt: now, updatedAt: now });
+    await repair.commit();
+  } else if (profile && !profile.retentionExpiresAt && profileExpiry) {
+    await profileRef.update({ retentionExpiresAt: profileExpiry, updatedAt: now });
+  }
+  if (request.data.purpose === "VERIFY" && !usableProfile) {
+    throw new HttpsError("failed-precondition", "Hồ sơ khuôn mặt chưa có hoặc đã hết thời hạn lưu. Vui lòng đăng ký lại.");
+  }
+  if (request.data.purpose === "ENROLL" && usableProfile) {
+    throw new HttpsError("already-exists", "Khuôn mặt đã được đăng ký. Quản trị viên phải đặt lại hồ sơ trước khi đăng ký mới.");
+  }
   const expiresAt = Timestamp.fromMillis(now.toMillis() + 60_000);
   const sessionId = randomUUID();
   const challenge = randomInt(0, 2) === 0 ? "TURN_LEFT" : "TURN_RIGHT";
@@ -856,9 +1301,25 @@ export const startFaceSession = onCall<StartFaceSessionInput>(callableOptions, a
     consentAcceptedAt: null,
     usedAt: null,
     outcome: null,
+    enforcementMode: policyEvaluation.effectiveEnforcementMode,
+    faceMatchThreshold: policy.faceMatchThreshold,
+    retentionDays: policy.retentionDays,
   };
   const batch = db.batch();
   batch.create(db.doc(`faceSessions/${sessionId}`), session);
+  batch.create(db.collection("faceTelemetry").doc(), {
+    ...safeFaceTelemetry({
+      companyId: context.employee.companyId,
+      branchId: context.branchId,
+      eventType: "SESSION_STARTED",
+      purpose: request.data.purpose,
+      enforcementMode: policyEvaluation.effectiveEnforcementMode,
+      outcome: "STARTED",
+      threshold: policy.faceMatchThreshold,
+    }),
+    createdAt: now,
+    expiresAt: faceTelemetryExpiry(now, policy.retentionDays),
+  });
   batch.create(db.collection("auditLogs").doc(), buildAuditLogDocument(request, context, {
     action: "FACE_SESSION_STARTED",
     targetType: "FACE_SESSION",
@@ -871,7 +1332,8 @@ export const startFaceSession = onCall<StartFaceSessionInput>(callableOptions, a
     purpose: request.data.purpose,
     challenge,
     expiresAt: expiresAt.toDate().toISOString(),
-    enrollmentStatus: context.employee.faceEnrollmentStatus,
+    enrollmentStatus: usableProfile ? "APPROVED" : "NOT_STARTED",
+    facePolicy: { ...publicPilotPolicy(policy), ...policyEvaluation },
   };
 });
 
@@ -897,6 +1359,7 @@ export const completeFaceSession = onCall<CompleteFaceSessionInput>(faceCallable
   const sessionRef = db.doc(`faceSessions/${sessionId}`);
   const profileRef = db.doc(`faceProfiles/${userId}`);
   const employeeRef = db.doc(`employees/${userId}`);
+  const policyRef = db.doc(`pilotPolicies/${pilotPolicyDocumentId(context.employee.companyId, context.branchId)}`);
   const faceProofId = randomUUID();
   const proofRef = db.doc(`faceProofs/${faceProofId}`);
   const now = Timestamp.now();
@@ -904,8 +1367,17 @@ export const completeFaceSession = onCall<CompleteFaceSessionInput>(faceCallable
 
   const encryptedDescriptor = encryptFaceDescriptor(request.data.descriptor, faceDataKey());
   const completion = await db.runTransaction(async (transaction) => {
-    const sessionSnapshot = await transaction.get(sessionRef);
-    const profileSnapshot = await transaction.get(profileRef);
+    const [sessionSnapshot, profileSnapshot, policySnapshot] = await Promise.all([
+      transaction.get(sessionRef),
+      transaction.get(profileRef),
+      transaction.get(policyRef),
+    ]);
+    const currentPolicy = pilotPolicyFromData(
+      context.employee.companyId,
+      context.branchId,
+      policySnapshot.exists ? policySnapshot.data() as Partial<PilotPolicyDocument> : undefined,
+    );
+    const currentPolicyEvaluation = effectiveFacePolicy(currentPolicy, userId, Timestamp.now());
     if (!sessionSnapshot.exists) throw new HttpsError("not-found", "Phiên xác thực khuôn mặt không tồn tại.");
     const session = sessionSnapshot.data() as FaceSessionDocument;
     if (
@@ -919,23 +1391,45 @@ export const completeFaceSession = onCall<CompleteFaceSessionInput>(faceCallable
     if (session.status !== "ACTIVE" || session.usedAt || session.expiresAt.toMillis() <= now.toMillis()) {
       throw new HttpsError("failed-precondition", "Phiên khuôn mặt đã dùng hoặc hết hạn.");
     }
-    if (session.purpose === "ENROLL" && profileSnapshot.exists) {
+    if (!faceMayBeCollected(currentPolicyEvaluation.effectiveEnforcementMode)) {
+      transaction.update(sessionRef, { status: "FAILED", usedAt: now, outcome: "POLICY_OFF" });
+      transaction.create(db.collection("auditLogs").doc(), buildAuditLogDocument(request, context, {
+        action: "FACE_SESSION_REJECTED_BY_KILL_SWITCH",
+        targetType: "FACE_SESSION",
+        targetId: sessionId,
+        metadata: { enforcementMode: currentPolicyEvaluation.effectiveEnforcementMode },
+      }));
+      return { failure: "POLICY_OFF" as const, matchScore: 0, enrolled: false };
+    }
+    const profile = profileSnapshot.exists ? profileSnapshot.data() as FaceProfileDocument : null;
+    const retentionDays = isValidFaceRetentionDays(currentPolicy.retentionDays)
+      ? currentPolicy.retentionDays
+      : isValidFaceRetentionDays(session.retentionDays) ? session.retentionDays : 90;
+    const storedProfileExpiry = profile ? faceProfileExpiry(profile, retentionDays) : null;
+    const profileExpired = Boolean(storedProfileExpiry && storedProfileExpiry.toMillis() <= now.toMillis());
+    if (session.purpose === "ENROLL" && profileSnapshot.exists && !profileExpired) {
       throw new HttpsError("already-exists", "Khuôn mặt đã được đăng ký. Quản trị viên phải đặt lại hồ sơ trước khi đăng ký mới.");
     }
 
     const liveness = validateFaceLivenessEvidence(request.data.evidence, session.challenge);
+    const matchThreshold = isSafeFaceMatchThreshold(currentPolicy.faceMatchThreshold)
+      ? currentPolicy.faceMatchThreshold
+      : isSafeFaceMatchThreshold(session.faceMatchThreshold) ? session.faceMatchThreshold : FACE_MATCH_DISTANCE_THRESHOLD;
+    const enforcementMode = currentPolicyEvaluation.effectiveEnforcementMode;
     let distance = 0;
     let matchScore = 1;
-    let failure: "LIVENESS_FAILED" | "PROFILE_REQUIRED" | "FACE_MISMATCH" | null = null;
+    let failure: "LIVENESS_FAILED" | "PROFILE_REQUIRED" | "PROFILE_EXPIRED" | "FACE_MISMATCH" | null = null;
     if (!liveness.valid) {
       failure = "LIVENESS_FAILED";
     } else if (session.purpose === "VERIFY") {
       if (!profileSnapshot.exists) {
         failure = "PROFILE_REQUIRED";
+      } else if (profileExpired) {
+        failure = "PROFILE_EXPIRED";
       } else {
         let storedDescriptor: number[];
         try {
-          const profile = profileSnapshot.data() as FaceProfileDocument;
+          if (!profile) throw new Error("Profile missing");
           storedDescriptor = decryptFaceDescriptor({
             encryptedDescriptor: profile.encryptedDescriptor,
             descriptorIv: profile.descriptorIv,
@@ -946,16 +1440,36 @@ export const completeFaceSession = onCall<CompleteFaceSessionInput>(faceCallable
         }
         distance = faceDescriptorDistance(request.data.descriptor, storedDescriptor);
         matchScore = faceMatchScore(distance);
-        if (distance > FACE_MATCH_DISTANCE_THRESHOLD) failure = "FACE_MISMATCH";
+        if (distance > matchThreshold) failure = "FACE_MISMATCH";
       }
     }
 
     const auditRef = db.collection("auditLogs").doc();
+    const telemetryRef = db.collection("faceTelemetry").doc();
     if (failure) {
       transaction.update(sessionRef, {
         status: "FAILED",
         usedAt: now,
-        outcome: failure === "LIVENESS_FAILED" ? "LIVENESS_FAILED" : "FACE_MISMATCH",
+        outcome: failure,
+      });
+      if (failure === "PROFILE_EXPIRED") {
+        transaction.delete(profileRef);
+        transaction.update(employeeRef, { faceEnrollmentStatus: "NOT_STARTED", faceRetentionExpiredAt: now, updatedAt: now });
+      }
+      transaction.create(telemetryRef, {
+        ...safeFaceTelemetry({
+          companyId: context.employee.companyId,
+          branchId: context.branchId,
+          eventType: "SESSION_REJECTED",
+          purpose: session.purpose,
+          enforcementMode,
+          outcome: failure,
+          matchScore,
+          threshold: matchThreshold,
+          livenessPassed: liveness.valid,
+        }),
+        createdAt: now,
+        expiresAt: faceTelemetryExpiry(now, retentionDays),
       });
       transaction.create(auditRef, buildAuditLogDocument(request, context, {
         action: "FACE_SESSION_REJECTED",
@@ -971,7 +1485,6 @@ export const completeFaceSession = onCall<CompleteFaceSessionInput>(faceCallable
     }
 
     if (session.purpose === "ENROLL") {
-      const existingProfile = profileSnapshot.exists ? profileSnapshot.data() as FaceProfileDocument : null;
       const profile: FaceProfileDocument = {
         companyId: context.employee.companyId,
         userId,
@@ -980,14 +1493,15 @@ export const completeFaceSession = onCall<CompleteFaceSessionInput>(faceCallable
         consentVersion: FACE_CONSENT_VERSION,
         consentAcceptedAt: now,
         consentPurpose: session.purpose,
-        enrolledAt: existingProfile?.enrolledAt ?? now,
+        enrolledAt: now,
         updatedAt: now,
         lastVerifiedAt: now,
+        retentionExpiresAt: faceTelemetryExpiry(now, retentionDays),
       };
       transaction.set(profileRef, profile);
       transaction.update(employeeRef, { faceEnrollmentStatus: "APPROVED", updatedAt: now });
     } else {
-      transaction.update(profileRef, { lastVerifiedAt: now, updatedAt: now });
+      transaction.update(profileRef, { lastVerifiedAt: now, updatedAt: now, retentionExpiresAt: storedProfileExpiry });
     }
 
     const proof: FaceProofDocument = {
@@ -1006,6 +1520,21 @@ export const completeFaceSession = onCall<CompleteFaceSessionInput>(faceCallable
       usedEventId: null,
     };
     transaction.create(proofRef, proof);
+    transaction.create(telemetryRef, {
+      ...safeFaceTelemetry({
+        companyId: context.employee.companyId,
+        branchId: context.branchId,
+        eventType: "SESSION_COMPLETED",
+        purpose: session.purpose,
+        enforcementMode,
+        outcome: session.purpose === "ENROLL" ? "ENROLLED" : "VERIFIED",
+        matchScore,
+        threshold: matchThreshold,
+        livenessPassed: true,
+      }),
+      createdAt: now,
+      expiresAt: faceTelemetryExpiry(now, retentionDays),
+    });
     transaction.update(sessionRef, {
       status: "COMPLETED",
       usedAt: now,
@@ -1023,7 +1552,9 @@ export const completeFaceSession = onCall<CompleteFaceSessionInput>(faceCallable
   });
 
   if (completion.failure === "LIVENESS_FAILED") throw new HttpsError("failed-precondition", "Kiểm tra chuyển động khuôn mặt không đạt.");
+  if (completion.failure === "POLICY_OFF") throw new HttpsError("failed-precondition", "Chính sách Face của chi nhánh đã được tắt.");
   if (completion.failure === "PROFILE_REQUIRED") throw new HttpsError("failed-precondition", "Chưa có hồ sơ khuôn mặt hợp lệ. Vui lòng đăng ký lại.");
+  if (completion.failure === "PROFILE_EXPIRED") throw new HttpsError("failed-precondition", "Hồ sơ khuôn mặt đã hết thời hạn lưu. Vui lòng đăng ký lại.");
   if (completion.failure === "FACE_MISMATCH") throw new HttpsError("permission-denied", "Khuôn mặt không khớp hồ sơ đã đăng ký.");
   return {
     faceProofId,
@@ -1039,16 +1570,37 @@ export const getPrecheck = onCall<PrecheckInput>(callableOptions, async (request
   const context = await loadAttendanceContext(userId);
   await enforceRateLimit(userId, "getPrecheck", 20);
   const deviceId = requireDeviceId(request.data?.deviceId);
-  const device = await readOwnedDevice(context, deviceId);
+  const now = Timestamp.now();
+  const db = getFirestore();
+  const [device, policy, profileSnapshot] = await Promise.all([
+    readOwnedDevice(context, deviceId),
+    loadPilotPolicy(context.employee.companyId, context.branchId),
+    db.doc(`faceProfiles/${userId}`).get(),
+  ]);
   if (!device) throw new HttpsError("failed-precondition", "Thiết bị chưa được đăng ký.");
+  const policyEvaluation = effectiveFacePolicy(policy, userId, now);
+  const profile = profileSnapshot.exists ? profileSnapshot.data() as FaceProfileDocument : null;
+  const retentionExpiresAt = profile ? faceProfileExpiry(profile, policy.retentionDays) : null;
+  const profileExpired = Boolean(retentionExpiresAt && retentionExpiresAt.toMillis() <= now.toMillis());
+  let faceEnrollmentStatus = context.employee.faceEnrollmentStatus;
+  if (faceEnrollmentStatus === "APPROVED" && (!profile || profileExpired)) {
+    const repair = db.batch();
+    if (profileSnapshot.exists) repair.delete(profileSnapshot.ref);
+    repair.update(db.doc(`employees/${userId}`), { faceEnrollmentStatus: "NOT_STARTED", faceRetentionExpiredAt: now, updatedAt: now });
+    await repair.commit();
+    faceEnrollmentStatus = "NOT_STARTED";
+  } else if (profile && !profile.retentionExpiresAt && retentionExpiresAt) {
+    await profileSnapshot.ref.update({ retentionExpiresAt, updatedAt: now });
+  }
+  const requiresFace = faceIsRequired(policyEvaluation.effectiveEnforcementMode);
 
   return {
-    serverTime: new Date().toISOString(),
+    serverTime: now.toDate().toISOString(),
     employee: {
       id: userId,
       name: context.employee.fullName,
       employeeCode: context.employee.employeeCode,
-      faceEnrollmentStatus: context.employee.faceEnrollmentStatus,
+      faceEnrollmentStatus,
     },
     branch: {
       id: context.branchId,
@@ -1060,11 +1612,12 @@ export const getPrecheck = onCall<PrecheckInput>(callableOptions, async (request
     },
     shift: { id: context.shiftId, name: context.shift.name, startTime: context.shift.startTime, endTime: context.shift.endTime },
     device: publicDeviceStatus(deviceId, device),
+    facePolicy: { ...publicPilotPolicy(policy), ...policyEvaluation },
     requirements: {
       trustedDevice: true,
       location: true,
-      faceVerification: true,
-      liveness: true,
+      faceVerification: requiresFace,
+      liveness: requiresFace,
       presenceProof: true,
     },
   };
@@ -1091,37 +1644,39 @@ export const checkIn = onCall<AttendanceInput>(callableOptions, async (request) 
   if (!request.data.presenceToken || !/^[A-Za-z0-9_-]{20,160}$/.test(request.data.presenceToken)) {
     throw new HttpsError("failed-precondition", "Bạn cần xác minh QR hiện diện trước khi chấm công.");
   }
-  if (!request.data.faceSessionId || !/^[A-Za-z0-9_-]{20,160}$/.test(request.data.faceSessionId)) {
-    throw new HttpsError("failed-precondition", "Bạn cần hoàn tất xác thực khuôn mặt và liveness trước khi chấm công.");
+  const now = Timestamp.now();
+  const faceProofId = typeof request.data.faceSessionId === "string" ? request.data.faceSessionId.trim() : "";
+  if (faceProofId && !/^[A-Za-z0-9_-]{20,160}$/.test(faceProofId)) {
+    throw new HttpsError("invalid-argument", "Mã bằng chứng khuôn mặt không hợp lệ.");
   }
   const presenceProofRef = db.doc(`presenceProofs/${request.data.presenceToken}`);
-  const faceProofRef = db.doc(`faceProofs/${request.data.faceSessionId}`);
+  const faceProofRef = faceProofId ? db.doc(`faceProofs/${faceProofId}`) : null;
+  const policyRef = db.doc(`pilotPolicies/${pilotPolicyDocumentId(context.employee.companyId, context.branchId)}`);
   const idempotencyRef = db.doc(`idempotencyKeys/${userId}_${request.data.idempotencyKey}`);
   const eventRef = db.collection("attendanceEvents").doc();
   const sessionRef = db.collection("workSessions").doc();
   const auditRef = db.collection("auditLogs").doc();
-  const now = Timestamp.now();
   const clientDate = new Date(request.data.clientTimestamp);
   const clockDifferenceSeconds = Number.isNaN(clientDate.getTime()) ? 0 : (now.toMillis() - clientDate.getTime()) / 1000;
   const distance = distanceInMeters(request.data.location, context.branch);
   const insideGeofence = distance <= context.branch.geofenceRadiusMeters + Math.min(request.data.location.accuracy, 30);
-  const risk = calculateAttendanceRisk({
-    insideGeofence,
-    locationAccuracy: request.data.location.accuracy,
-    deviceTrusted: trustedDevice,
-    faceVerified: true,
-    livenessVerified: true,
-    presenceVerified: true,
-    offline: Boolean(request.data.offline),
-    clockDifferenceSeconds,
-  });
-
   const result = await db.runTransaction(async (transaction) => {
     const existing = await transaction.get(idempotencyRef);
     if (existing.exists) return existing.data()?.response;
 
+    const policySnapshot = await transaction.get(policyRef);
     const presenceProofSnapshot = await transaction.get(presenceProofRef);
-    const faceProofSnapshot = await transaction.get(faceProofRef);
+    const faceProofSnapshot = faceProofRef ? await transaction.get(faceProofRef) : null;
+    const policy = pilotPolicyFromData(
+      context.employee.companyId,
+      context.branchId,
+      policySnapshot.exists ? policySnapshot.data() as Partial<PilotPolicyDocument> : undefined,
+    );
+    const policyEvaluation = effectiveFacePolicy(policy, userId, Timestamp.now());
+    const faceRequired = faceIsRequired(policyEvaluation.effectiveEnforcementMode);
+    if (faceRequired && !faceProofRef) {
+      throw new HttpsError("failed-precondition", "Bạn cần hoàn tất xác thực khuôn mặt và liveness trước khi chấm công.");
+    }
     if (!presenceProofSnapshot.exists) throw new HttpsError("failed-precondition", "Bằng chứng hiện diện không tồn tại.");
     const presenceProof = presenceProofSnapshot.data() as PresenceProofDocument;
     if (presenceProof.userId !== userId || presenceProof.deviceId !== request.data.deviceId || presenceProof.companyId !== context.employee.companyId || presenceProof.branchId !== context.branchId) {
@@ -1130,20 +1685,25 @@ export const checkIn = onCall<AttendanceInput>(callableOptions, async (request) 
     if (presenceProof.usedAt || presenceProof.expiresAt.toMillis() <= now.toMillis()) {
       throw new HttpsError("failed-precondition", "Bằng chứng hiện diện đã dùng hoặc hết hạn.");
     }
-    if (!faceProofSnapshot.exists) throw new HttpsError("failed-precondition", "Bằng chứng khuôn mặt không tồn tại.");
-    const faceProof = faceProofSnapshot.data() as FaceProofDocument;
-    if (
-      faceProof.userId !== userId
-      || faceProof.deviceId !== request.data.deviceId
-      || faceProof.companyId !== context.employee.companyId
-      || faceProof.branchId !== context.branchId
-      || !faceProof.faceVerified
-      || !faceProof.livenessVerified
-    ) {
-      throw new HttpsError("permission-denied", "Bằng chứng khuôn mặt không thuộc phiên chấm công này.");
-    }
-    if (faceProof.usedAt || faceProof.expiresAt.toMillis() <= now.toMillis()) {
-      throw new HttpsError("failed-precondition", "Bằng chứng khuôn mặt đã dùng hoặc hết hạn.");
+    let faceProof: FaceProofDocument | null = null;
+    if (faceProofSnapshot) {
+      if (!faceProofSnapshot.exists) throw new HttpsError("failed-precondition", "Bằng chứng khuôn mặt không tồn tại.");
+      faceProof = faceProofSnapshot.data() as FaceProofDocument;
+      if (
+        faceProof.userId !== userId
+        || faceProof.deviceId !== request.data.deviceId
+        || faceProof.companyId !== context.employee.companyId
+        || faceProof.branchId !== context.branchId
+        || !faceProof.faceVerified
+        || !faceProof.livenessVerified
+      ) {
+        throw new HttpsError("permission-denied", "Bằng chứng khuôn mặt không thuộc phiên chấm công này.");
+      }
+      if (faceProof.usedAt || faceProof.expiresAt.toMillis() <= now.toMillis()) {
+        throw new HttpsError("failed-precondition", "Bằng chứng khuôn mặt đã dùng hoặc hết hạn.");
+      }
+    } else if (faceRequired) {
+      throw new HttpsError("failed-precondition", "Bằng chứng khuôn mặt là bắt buộc theo chính sách chi nhánh.");
     }
 
     const activeSessions = await transaction.get(
@@ -1153,6 +1713,19 @@ export const checkIn = onCall<AttendanceInput>(callableOptions, async (request) 
       throw new HttpsError("already-exists", "Bạn đã có một ca làm đang hoạt động.");
     }
 
+    const faceVerified = Boolean(faceProof?.faceVerified);
+    const livenessVerified = Boolean(faceProof?.livenessVerified);
+    const risk = calculateAttendanceRisk({
+      insideGeofence,
+      locationAccuracy: request.data.location.accuracy,
+      deviceTrusted: trustedDevice,
+      faceVerified,
+      livenessVerified,
+      faceRequired,
+      presenceVerified: true,
+      offline: Boolean(request.data.offline),
+      clockDifferenceSeconds,
+    });
     const attendanceStatus = risk.decision === "DENY" ? "REJECTED" : risk.decision === "REVIEW" ? "PENDING_REVIEW" : "VALID";
     const response = {
       eventId: eventRef.id,
@@ -1182,11 +1755,12 @@ export const checkIn = onCall<AttendanceInput>(callableOptions, async (request) 
       insideGeofence,
       deviceId: request.data.deviceId,
       deviceVerified: trustedDevice,
-      faceProofId: request.data.faceSessionId,
-      faceSessionId: faceProof.faceSessionId,
-      faceVerified: true,
-      livenessVerified: true,
-      faceMatchScore: faceProof.matchScore,
+      faceProofId: faceProofId || null,
+      faceSessionId: faceProof?.faceSessionId ?? null,
+      faceVerified,
+      livenessVerified,
+      faceMatchScore: faceProof?.matchScore ?? null,
+      faceEnforcementMode: policyEvaluation.effectiveEnforcementMode,
       presenceProofId: request.data.presenceToken,
       presenceVerified: true,
       riskScore: risk.score,
@@ -1205,6 +1779,8 @@ export const checkIn = onCall<AttendanceInput>(callableOptions, async (request) 
       endedAt: null,
       status: risk.decision === "DENY" ? "REJECTED" : "ACTIVE",
       lastHeartbeatAt: now,
+      lastDistanceMeters: distance,
+      insideGeofence,
       outsideSince: null,
       totalOutsideMinutes: 0,
       riskScore: risk.score,
@@ -1212,7 +1788,23 @@ export const checkIn = onCall<AttendanceInput>(callableOptions, async (request) 
 
     transaction.create(idempotencyRef, { userId, operation: "CHECK_IN", createdAt: now, response });
     transaction.update(presenceProofRef, { usedAt: now, usedEventId: eventRef.id });
-    transaction.update(faceProofRef, { usedAt: now, usedEventId: eventRef.id });
+    if (faceProofRef) transaction.update(faceProofRef, { usedAt: now, usedEventId: eventRef.id });
+    if (!faceProof) {
+      transaction.create(db.collection("faceTelemetry").doc(), {
+        ...safeFaceTelemetry({
+          companyId: context.employee.companyId,
+          branchId: context.branchId,
+          eventType: "CHECK_IN_WITHOUT_FACE",
+          purpose: "CHECK_IN",
+          enforcementMode: policyEvaluation.effectiveEnforcementMode,
+          outcome: "FACE_OPTIONAL",
+          threshold: policy.faceMatchThreshold,
+          livenessPassed: false,
+        }),
+        createdAt: now,
+        expiresAt: faceTelemetryExpiry(now, policy.retentionDays),
+      });
+    }
     transaction.create(auditRef, buildAuditLogDocument(request, context, {
       action: "ATTENDANCE_CHECK_IN_DECIDED",
       targetType: "ATTENDANCE_EVENT",

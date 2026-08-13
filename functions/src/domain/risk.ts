@@ -7,6 +7,7 @@ export interface AttendanceRiskInput {
   presenceVerified: boolean;
   offline: boolean;
   clockDifferenceSeconds: number;
+  faceRequired?: boolean;
 }
 
 export interface AttendanceRiskResult {
@@ -32,11 +33,11 @@ export function calculateAttendanceRisk(input: AttendanceRiskInput): AttendanceR
     score += 20;
     reasons.push("UNTRUSTED_DEVICE");
   }
-  if (!input.faceVerified) {
+  if (input.faceRequired !== false && !input.faceVerified) {
     score += 20;
     reasons.push("FACE_NOT_VERIFIED");
   }
-  if (!input.livenessVerified) {
+  if (input.faceRequired !== false && !input.livenessVerified) {
     score += 25;
     reasons.push("LIVENESS_NOT_VERIFIED");
   }

@@ -1,4 +1,5 @@
 import type { Timestamp } from "firebase-admin/firestore";
+import type { FaceEnforcementMode } from "./pilot";
 
 export type EmployeeRole = "SUPER_ADMIN" | "COMPANY_ADMIN" | "HR" | "MANAGER" | "EMPLOYEE";
 
@@ -105,7 +106,10 @@ export interface FaceSessionDocument {
   consentVersion: "biometric-consent-v1" | null;
   consentAcceptedAt: Timestamp | null;
   usedAt: Timestamp | null;
-  outcome: "ENROLLED" | "VERIFIED" | "FACE_MISMATCH" | "LIVENESS_FAILED" | "RESET" | null;
+  outcome: "ENROLLED" | "VERIFIED" | "FACE_MISMATCH" | "LIVENESS_FAILED" | "PROFILE_REQUIRED" | "PROFILE_EXPIRED" | "RESET" | "CONSENT_WITHDRAWN" | "POLICY_OFF" | null;
+  enforcementMode?: FaceEnforcementMode;
+  faceMatchThreshold?: number;
+  retentionDays?: number;
 }
 
 export interface FaceProfileDocument {
@@ -121,6 +125,7 @@ export interface FaceProfileDocument {
   enrolledAt: Timestamp;
   updatedAt: Timestamp;
   lastVerifiedAt: Timestamp | null;
+  retentionExpiresAt?: Timestamp;
 }
 
 export interface FaceProofDocument {
@@ -137,4 +142,22 @@ export interface FaceProofDocument {
   expiresAt: Timestamp;
   usedAt: Timestamp | null;
   usedEventId: string | null;
+}
+
+export interface PilotPolicyDocument {
+  companyId: string;
+  branchId: string;
+  enforcementMode: FaceEnforcementMode;
+  faceMatchThreshold: number;
+  retentionDays: number;
+  rollout: {
+    label: string;
+    cohortPercent: number;
+    startsAt: Timestamp | null;
+    endsAt: Timestamp | null;
+    notes: string | null;
+  };
+  version: number;
+  updatedAt: Timestamp | null;
+  updatedBy: string | null;
 }

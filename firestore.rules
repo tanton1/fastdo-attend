@@ -103,6 +103,18 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    match /pilotPolicies/{policyId} {
+      allow read, write: if false;
+    }
+
+    match /faceTelemetry/{telemetryId} {
+      allow read, write: if false;
+    }
+
+    match /biometricConsentTombstones/{tombstoneId} {
+      allow read, write: if false;
+    }
+
     match /employeeCodes/{lockId} {
       allow read, write: if false;
     }
