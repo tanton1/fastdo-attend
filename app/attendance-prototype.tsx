@@ -1730,6 +1730,7 @@ export function AttendancePrototype() {
   const [time, setTime] = useState("07:52");
   const [date, setDate] = useState("");
   const [toast, setToast] = useState("");
+  const [online, setOnline] = useState(true);
   const [user, setUser] = useState<AttendanceUser | null>(null);
   const [precheck, setPrecheck] = useState<PrecheckData | null>(null);
   const [location, setLocation] = useState<DeviceLocation | null>(null);
@@ -1741,6 +1742,14 @@ export function AttendancePrototype() {
     if (demoMode || !("serviceWorker" in navigator)) return;
     void navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(() => undefined);
   }, [demoMode]);
+
+  useEffect(() => {
+    const update = () => setOnline(navigator.onLine);
+    update();
+    window.addEventListener("online", update);
+    window.addEventListener("offline", update);
+    return () => { window.removeEventListener("online", update); window.removeEventListener("offline", update); };
+  }, []);
 
   useEffect(() => {
     const update = () => {
@@ -1836,6 +1845,7 @@ export function AttendancePrototype() {
         <div className="device-caption"><span>EMPLOYEE PWA</span><span>390 × 844</span></div>
         <div className="device-frame">
           <div className="device-status"><span>{time}</span><span className="device-island" /><span>▮ ◒</span></div>
+          {!online && <div className="offline-banner" role="status"><span>!</span>Đang ngoại tuyến · Chấm công cần kết nối server để xác nhận</div>}
           {screen === "login" && <LoginScreen onLogin={handleLogin} />}
           {screen === "password" && user && <ChangeTemporaryPasswordScreen user={user} onChanged={(updatedUser) => { setUser(updatedUser); setScreen("home"); }} onLogout={() => void handleLogout()} />}
           {screen === "home" && user && <HomeScreen time={time} date={date} user={user} precheck={precheck} onCheckIn={() => setScreen("precheck")} onManageDevices={() => setScreen("devices")} onProfile={() => setScreen("profile")} onRequests={() => setScreen("requests")} />}

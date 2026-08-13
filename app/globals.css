@@ -288,6 +288,8 @@ button { color: inherit; }
 .camera-error { position: relative; z-index: 3; padding: 0 22px; }
 .toast { position: absolute; z-index: 30; left: 16px; right: 16px; top: 43px; padding: 12px 14px; border-radius: 10px; border: 1px solid rgba(49,208,124,.3); background: rgba(12,25,18,.96); color: #ccebd9; display: flex; align-items: center; gap: 9px; font-size: 9px; box-shadow: 0 15px 35px rgba(0,0,0,.4); animation: toast-in .35s ease both; }
 .toast span { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; background: var(--green); color: #07120c; }
+.offline-banner { position: absolute; z-index: 31; left: 10px; right: 10px; top: 39px; display: flex; align-items: center; gap: 7px; padding: 8px 10px; border: 1px solid rgba(255,171,32,.32); border-radius: 8px; background: rgba(42,25,5,.97); color: #ffd792; font-size: 8px; line-height: 1.3; box-shadow: 0 12px 28px rgba(0,0,0,.35); }
+.offline-banner span { width: 15px; height: 15px; flex: 0 0 15px; display: grid; place-items: center; border-radius: 50%; background: #ffab20; color: #1b1001; font-weight: 800; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(-10px); } }
 
 .success-screen { padding: 78px 24px 24px; display: flex; flex-direction: column; align-items: center; background: radial-gradient(circle at 50% 21%, rgba(255,90,0,.18), transparent 29%), #080a0a; text-align: center; }

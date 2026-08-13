@@ -12,7 +12,7 @@ PWA chấm công nhân viên theo phong cách **Black Ignite**, kết hợp Fire
 - Region dữ liệu và Functions: `asia-southeast1`
 - Firebase Authentication: Email/Password đã bật
 - Firestore: database `(default)` đã tạo, rules và indexes đã triển khai
-- Cloud Functions thế hệ 2: callable API chấm công, hồ sơ, thiết bị, Face AI, quản trị nhân sự, Presence QR, pilot policy, báo cáo/realtime, yêu cầu điều chỉnh công, nghỉ phép và payroll CSV chạy Node.js 22
+- Cloud Functions thế hệ 2: 32 callable API chấm công, hồ sơ, thiết bị, Face AI, quản trị nhân sự, Presence QR, pilot policy, báo cáo/realtime, yêu cầu điều chỉnh công, nghỉ phép và payroll CSV chạy Node.js 22
 - Firebase App Check: reCAPTCHA Enterprise đã bật enforcement cho toàn bộ callable Functions production
 - Thiết bị mới phải được quản trị viên duyệt trước khi GPS/check-in được thực hiện
 - Quản trị viên có bảng điều khiển trong PWA để lọc, duyệt, khóa và mở khóa thiết bị; xử lý yêu cầu điều chỉnh công/nghỉ phép và xuất payroll CSV
