@@ -70,6 +70,8 @@ Kiểm thử tích hợp emulator cần Java được cài và có trong `PATH`:
 firebase emulators:exec --only auth,firestore,functions "npm --prefix functions run test:emulators"
 ```
 
+The smoke suite seeds a manager, employee, trusted device, pilot policy and presence proof, then verifies precheck, check-in idempotency, check-out, attendance correction approval, leave approval, attendance report and payroll CSV export.
+
 ## Triển khai Firebase
 
 ```bash
