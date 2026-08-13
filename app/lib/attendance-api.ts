@@ -10,6 +10,7 @@ const demoUser: AttendanceUser = {
   email: "fd0238@fastdo.attend",
   role: "COMPANY_ADMIN",
   companyId: "fastdo_demo",
+  faceEnrollmentStatus: "NOT_STARTED",
   canManageDevices: true,
   mustChangePassword: false,
   isDemo: true,

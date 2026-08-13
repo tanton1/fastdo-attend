@@ -309,18 +309,11 @@ function formatDeviceTime(value: string | null): string {
   }).format(date);
 }
 
-function ProfileScreen({ user, initialFaceStatus, onBack, onLogout, onWithdrawn }: { user: AttendanceUser; initialFaceStatus: FaceEnrollmentStatus | null; onBack: () => void; onLogout: () => void; onWithdrawn: () => void }) {
-  const [faceStatus, setFaceStatus] = useState<FaceEnrollmentStatus | null>(initialFaceStatus);
-  const [statusLoading, setStatusLoading] = useState(true);
+function ProfileScreen({ user, onBack, onLogout, onWithdrawn }: { user: AttendanceUser; onBack: () => void; onLogout: () => void; onWithdrawn: () => void }) {
+  const [faceStatus, setFaceStatus] = useState<FaceEnrollmentStatus>(user.faceEnrollmentStatus ?? "NOT_STARTED");
   const [withdrawing, setWithdrawing] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-
-  useEffect(() => {
-    let active = true;
-    void getPrecheck().then((data) => { if (active) setFaceStatus(data.employee.faceEnrollmentStatus); }).catch(() => undefined).finally(() => { if (active) setStatusLoading(false); });
-    return () => { active = false; };
-  }, []);
 
   async function withdraw() {
     const confirmed = window.confirm("Rút đồng ý Face AI và xóa mẫu khuôn mặt? Các phiên và bằng chứng Face chưa dùng sẽ bị thu hồi. Bạn có thể phải dùng phương thức chấm công thay thế.");
@@ -347,12 +340,12 @@ function ProfileScreen({ user, initialFaceStatus, onBack, onLogout, onWithdrawn 
         <section className="profile-identity"><span>{user.fullName.trim().split(/\s+/).slice(-2).map((part) => part[0]).join("").toUpperCase()}</span><div><strong>{user.fullName}</strong><small>{user.employeeCode} · {user.email}</small></div></section>
         <section className="face-consent-card" aria-labelledby="face-privacy-title">
           <div className="face-consent-card__head"><span>◉</span><div><small>DỮ LIỆU SINH TRẮC HỌC</small><h2 id="face-privacy-title">Quyền riêng tư Face AI</h2></div></div>
-          <div className="face-consent-state"><span className={`face-state ${faceStatus ? `face-state--${faceStatus.toLowerCase()}` : ""}`}>● {statusLoading ? "Đang kiểm tra…" : faceStatus ? faceStatusLabel(faceStatus) : "Không thể tải trạng thái"}</span><small>{faceStatus === "APPROVED" ? "Đang có hiệu lực" : faceStatus === "NOT_STARTED" ? "Không lưu mẫu hoạt động" : "Có thể thử lại sau"}</small></div>
+          <div className="face-consent-state"><span className={`face-state face-state--${faceStatus.toLowerCase()}`}>● {faceStatusLabel(faceStatus)}</span><small>{faceStatus === "APPROVED" ? "Đang có hiệu lực" : faceStatus === "NOT_STARTED" ? "Không lưu mẫu hoạt động" : "Có thể thử lại sau"}</small></div>
           <p>FASTDO lưu mẫu số đã mã hóa để đối chiếu khuôn mặt. Ảnh và video gốc chỉ được xử lý trên thiết bị, không tải lên máy chủ.</p>
           <ul><li>Bạn có thể rút đồng ý bất cứ lúc nào.</li><li>Rút đồng ý sẽ xóa mẫu và thu hồi phiên Face chưa dùng.</li><li>Nhật ký chấm công hợp lệ vẫn được lưu theo quy định doanh nghiệp.</li></ul>
           {error && <p className="admin-message admin-message--error" role="alert">{error}</p>}
           {notice && <p className="admin-message admin-message--success" role="status">{notice}</p>}
-          {!statusLoading && (faceStatus !== "NOT_STARTED" ? <button className="danger-button" onClick={() => void withdraw()} disabled={withdrawing}>{withdrawing ? "Đang xóa an toàn…" : "Rút đồng ý & xóa mẫu"}</button> : <div className="face-consent-empty">Chưa có mẫu Face AI để xóa.</div>)}
+          {faceStatus !== "NOT_STARTED" ? <button className="danger-button" onClick={() => void withdraw()} disabled={withdrawing}>{withdrawing ? "Đang xóa an toàn…" : "Rút đồng ý & xóa mẫu"}</button> : <div className="face-consent-empty">Chưa có mẫu Face AI để xóa.</div>}
         </section>
         <button className="secondary-button profile-logout" onClick={onLogout}>Đăng xuất tài khoản</button>
       </main>
@@ -1634,7 +1627,7 @@ export function AttendancePrototype() {
           {screen === "login" && <LoginScreen onLogin={handleLogin} />}
           {screen === "password" && user && <ChangeTemporaryPasswordScreen user={user} onChanged={(updatedUser) => { setUser(updatedUser); setScreen("home"); }} onLogout={() => void handleLogout()} />}
           {screen === "home" && user && <HomeScreen time={time} date={date} user={user} precheck={precheck} onCheckIn={() => setScreen("precheck")} onManageDevices={() => setScreen("devices")} onProfile={() => setScreen("profile")} />}
-          {screen === "profile" && user && <ProfileScreen user={user} initialFaceStatus={precheck?.employee.faceEnrollmentStatus ?? null} onBack={() => setScreen("home")} onLogout={() => void handleLogout()} onWithdrawn={() => setPrecheck((current) => current ? { ...current, employee: { ...current.employee, faceEnrollmentStatus: "NOT_STARTED" } } : current)} />}
+          {screen === "profile" && user && <ProfileScreen user={user} onBack={() => setScreen("home")} onLogout={() => void handleLogout()} onWithdrawn={() => { setUser((current) => current ? { ...current, faceEnrollmentStatus: "NOT_STARTED" } : current); setPrecheck((current) => current ? { ...current, employee: { ...current.employee, faceEnrollmentStatus: "NOT_STARTED" } } : current); }} />}
           {screen === "devices" && user?.canManageDevices && <DeviceAdminScreen user={user} onBack={() => setScreen("home")} />}
           {screen === "precheck" && <PrecheckScreen onBack={() => setScreen("home")} onContinue={(data, currentLocation, useFace) => { setPrecheck(data); setLocation(currentLocation); setFaceProofId(""); setFaceStepSelected(useFace); setScreen(useFace ? "face" : "presence"); }} />}
           {screen === "face" && precheck && <FaceScreen precheck={precheck} onBack={() => { setFaceProofId(""); setScreen("precheck"); }} onComplete={async (proofId) => { setFaceProofId(proofId); setScreen("presence"); }} />}

@@ -307,6 +307,7 @@ export const getMyProfile = onCall(callableOptions, async (request) => {
     email: context.employee.email,
     role: context.employee.role,
     companyId: context.employee.companyId,
+    faceEnrollmentStatus: context.employee.faceEnrollmentStatus,
     canManageDevices: MANAGER_ROLES.includes(context.employee.role),
     mustChangePassword: Boolean(context.employee.mustChangePassword),
   };

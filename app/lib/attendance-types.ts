@@ -11,6 +11,7 @@ export interface AttendanceUser {
   email: string;
   role: EmployeeRole;
   companyId: string;
+  faceEnrollmentStatus: FaceEnrollmentStatus;
   canManageDevices: boolean;
   mustChangePassword: boolean;
   isDemo: boolean;
