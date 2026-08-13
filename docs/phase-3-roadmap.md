@@ -11,13 +11,13 @@ Mục tiêu của giai đoạn 03 là chuyển hệ thống từ MVP có backend
 
 **Đã đạt:** request không có App Check bị từ chối; quản trị viên có thể lọc, duyệt, khóa hoặc mở khóa thiết bị ngay trong PWA; toàn bộ quyết định thiết bị được lưu audit.
 
-## Sprint 2 — Hiện diện tại cơ sở (ưu tiên P0)
+## Sprint 2 — Hiện diện tại cơ sở (P0 · đã triển khai QR động)
 
 - Xây QR động có chữ ký, nonce và hạn dùng 30–60 giây hoặc Presence Gateway nội bộ.
 - Ghép GPS + độ chính xác + thiết bị + bằng chứng hiện diện vào risk score.
 - Chống replay, chống gửi lặp và lưu lý do `ALLOW/REVIEW/DENY`.
 
-**Hoàn thành khi:** check-in ngoài geofence hoặc dùng QR cũ bị từ chối; check-in hợp lệ tạo đúng một event và một work session.
+**Đã đạt:** QR được ký bằng HMAC-SHA256 với khóa Secret Manager, hết hạn sau 45 giây, proof gắn người dùng + thiết bị + chi nhánh và được tiêu thụ nguyên tử cùng check-in. Có mã 6 số dự phòng cho trình duyệt chưa hỗ trợ quét QR.
 
 ## Sprint 3 — Face AI và quyền riêng tư (ưu tiên P0)
 

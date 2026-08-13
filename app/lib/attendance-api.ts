@@ -1,7 +1,7 @@
 import { browserLocalPersistence, browserSessionPersistence, sendPasswordResetEmail, setPersistence, signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { httpsCallable } from "firebase/functions";
 import { firebaseDemoMode, getFirebaseServices } from "./firebase-client";
-import type { AdminDevice, AttendanceUser, CheckInResult, CheckOutResult, DeviceLocation, DeviceReviewResult, DeviceStatus, LocationHeartbeatResult, PrecheckData } from "./attendance-types";
+import type { AdminDevice, AttendanceUser, CheckInResult, CheckOutResult, DeviceLocation, DeviceReviewResult, DeviceStatus, LocationHeartbeatResult, PrecheckData, PresenceChallenge, PresenceProof } from "./attendance-types";
 
 const demoUser: AttendanceUser = {
   uid: "demo_hai_au",
@@ -136,6 +136,39 @@ export async function reviewManagedDevice(deviceId: string, decision: Extract<De
   }
 }
 
+export async function createPresenceChallenge(branchId?: string): Promise<PresenceChallenge> {
+  if (firebaseDemoMode()) {
+    await wait(300);
+    return {
+      challengeId: crypto.randomUUID(),
+      qrToken: `fastdo-presence-demo-${crypto.randomUUID()}`,
+      code: "829104",
+      branch: { id: demoPrecheck.branch.id, name: demoPrecheck.branch.name },
+      expiresAt: new Date(Date.now() + 45_000).toISOString(),
+    };
+  }
+  const callable = httpsCallable<{ branchId?: string }, PresenceChallenge>(getFirebaseServices().functions, "createPresenceChallenge");
+  try {
+    return (await callable(branchId ? { branchId } : {})).data;
+  } catch (reason) {
+    throw new Error(firebaseErrorMessage(reason, "Không thể tạo mã hiện diện mới."));
+  }
+}
+
+export async function verifyPresenceChallenge(input: { qrToken?: string; code?: string }): Promise<PresenceProof> {
+  if (firebaseDemoMode()) {
+    await wait(350);
+    if (input.code !== "829104" && !input.qrToken?.startsWith("fastdo-presence-demo-")) throw new Error("Mã hiện diện demo không hợp lệ.");
+    return { proofId: crypto.randomUUID(), branchId: demoPrecheck.branch.id, expiresAt: new Date(Date.now() + 90_000).toISOString() };
+  }
+  const callable = httpsCallable<{ deviceId: string; qrToken?: string; code?: string }, PresenceProof>(getFirebaseServices().functions, "verifyPresenceChallenge");
+  try {
+    return (await callable({ deviceId: getOrCreateDeviceId(), ...input })).data;
+  } catch (reason) {
+    throw new Error(firebaseErrorMessage(reason, "Không thể xác minh mã hiện diện."));
+  }
+}
+
 export async function requestPasswordReset(identifier: string): Promise<string> {
   if (!identifier.trim()) throw new Error("Nhập mã nhân viên hoặc email trước khi khôi phục mật khẩu.");
   if (firebaseDemoMode()) return "Bản demo không gửi email. Hãy dùng mật khẩu fastdo2026.";
@@ -217,7 +250,7 @@ export async function readCurrentLocation(fallbackToDemo = false): Promise<Devic
   });
 }
 
-export async function submitCheckIn(location: DeviceLocation): Promise<CheckInResult> {
+export async function submitCheckIn(location: DeviceLocation, presenceToken: string): Promise<CheckInResult> {
   if (firebaseDemoMode()) {
     await wait(800);
     return {
@@ -236,6 +269,7 @@ export async function submitCheckIn(location: DeviceLocation): Promise<CheckInRe
     idempotencyKey: crypto.randomUUID(),
     deviceId: getOrCreateDeviceId(),
     location,
+    presenceToken,
     clientTimestamp: new Date().toISOString(),
   });
   return response.data as CheckInResult;

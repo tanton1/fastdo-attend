@@ -1,12 +1,22 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import Image from "next/image";
+import QRCode from "qrcode";
 import { firebaseDemoMode } from "./lib/firebase-client";
-import { getPrecheck, listManagedDevices, loginEmployee, logoutEmployee, readCurrentLocation, requestPasswordReset, restoreAuthenticatedUser, reviewManagedDevice, sendLocationHeartbeat, submitCheckIn, submitCheckOut } from "./lib/attendance-api";
-import type { AdminDevice, AttendanceUser, CheckInResult, DeviceLocation, DeviceStatus, LocationHeartbeatResult, PrecheckData } from "./lib/attendance-types";
+import { createPresenceChallenge, getPrecheck, listManagedDevices, loginEmployee, logoutEmployee, readCurrentLocation, requestPasswordReset, restoreAuthenticatedUser, reviewManagedDevice, sendLocationHeartbeat, submitCheckIn, submitCheckOut, verifyPresenceChallenge } from "./lib/attendance-api";
+import type { AdminDevice, AttendanceUser, CheckInResult, DeviceLocation, DeviceStatus, LocationHeartbeatResult, PrecheckData, PresenceChallenge } from "./lib/attendance-types";
 
-type Screen = "login" | "home" | "devices" | "precheck" | "face" | "success" | "session";
+type Screen = "login" | "home" | "devices" | "precheck" | "face" | "presence" | "success" | "session";
 type CheckState = "waiting" | "checking" | "success" | "warning";
+
+interface BarcodeDetectorLike {
+  detect(source: HTMLVideoElement): Promise<Array<{ rawValue: string }>>;
+}
+
+interface BarcodeDetectorConstructor {
+  new(options: { formats: string[] }): BarcodeDetectorLike;
+}
 
 const checks = [
   {
@@ -240,7 +250,65 @@ function formatDeviceTime(value: string | null): string {
   }).format(date);
 }
 
+function PresenceAdminPanel() {
+  const [challenge, setChallenge] = useState<PresenceChallenge | null>(null);
+  const [qrDataUrl, setQrDataUrl] = useState("");
+  const [secondsLeft, setSecondsLeft] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!challenge) return;
+    const timer = window.setInterval(() => setSecondsLeft(Math.max(0, Math.ceil((new Date(challenge.expiresAt).getTime() - Date.now()) / 1000))), 1000);
+    return () => window.clearInterval(timer);
+  }, [challenge]);
+
+  async function generate() {
+    setLoading(true);
+    setError("");
+    try {
+      const next = await createPresenceChallenge();
+      const image = await QRCode.toDataURL(next.qrToken, {
+        width: 240,
+        margin: 1,
+        errorCorrectionLevel: "M",
+        color: { dark: "#080a0a", light: "#ffffff" },
+      });
+      setChallenge(next);
+      setQrDataUrl(image);
+      setSecondsLeft(Math.max(0, Math.ceil((new Date(next.expiresAt).getTime() - Date.now()) / 1000)));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Không thể tạo mã hiện diện.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <section className="presence-admin" aria-label="QR hiện diện tại cơ sở">
+      <div className="presence-admin__intro">
+        <span>⌘</span>
+        <div><strong>QR hiện diện động</strong><p>Mã được ký tại máy chủ, tự hết hạn sau 45 giây và chỉ dùng đúng chi nhánh.</p></div>
+      </div>
+
+      {!challenge && <div className="presence-admin__empty"><span>▦</span><strong>Chưa phát mã hiện diện</strong><p>Tạo mã khi nhân viên đã có mặt tại điểm chấm công.</p></div>}
+
+      {challenge && <article className={`presence-qr-card ${secondsLeft === 0 ? "is-expired" : ""}`}>
+        <div className="presence-qr-card__head"><div><span>ĐIỂM CHẤM CÔNG</span><strong>{challenge.branch.name}</strong></div><b>{secondsLeft > 0 ? `${secondsLeft}s` : "HẾT HẠN"}</b></div>
+        {qrDataUrl && <Image src={qrDataUrl} alt={`QR hiện diện ${challenge.branch.name}`} width={198} height={198} unoptimized />}
+        <p>Mã nhập nhanh</p>
+        <strong className="presence-code">{challenge.code.slice(0, 3)} {challenge.code.slice(3)}</strong>
+        <small>Không chụp hoặc gửi mã ra ngoài cơ sở.</small>
+      </article>}
+
+      {error && <p className="admin-message admin-message--error" role="alert">{error}</p>}
+      <button className="primary-button presence-generate" onClick={() => void generate()} disabled={loading}>{loading ? "Đang ký mã…" : challenge ? "Tạo mã mới" : "Phát QR hiện diện"}</button>
+    </section>
+  );
+}
+
 function DeviceAdminScreen({ user, onBack }: { user: AttendanceUser; onBack: () => void }) {
+  const [section, setSection] = useState<"DEVICES" | "PRESENCE">("DEVICES");
   const [devices, setDevices] = useState<AdminDevice[]>([]);
   const [filter, setFilter] = useState<"ALL" | DeviceStatus>("ALL");
   const [loading, setLoading] = useState(true);
@@ -303,10 +371,10 @@ function DeviceAdminScreen({ user, onBack }: { user: AttendanceUser; onBack: () 
       <header className="admin-header">
         <button className="back-button" onClick={onBack} aria-label="Quay lại">←</button>
         <div>
-          <span>QUẢN TRỊ THIẾT BỊ</span>
-          <h1 id="device-admin-title">Kiểm soát truy cập</h1>
+          <span>TRUNG TÂM QUẢN TRỊ</span>
+          <h1 id="device-admin-title">{section === "DEVICES" ? "Kiểm soát truy cập" : "Hiện diện tại cơ sở"}</h1>
         </div>
-        <button className="admin-refresh" onClick={() => void refresh()} disabled={loading} aria-label="Tải lại danh sách">↻</button>
+        <button className="admin-refresh" onClick={() => section === "DEVICES" && void refresh()} disabled={section !== "DEVICES" || loading} aria-label="Tải lại danh sách">↻</button>
       </header>
 
       <main className="admin-content">
@@ -316,7 +384,12 @@ function DeviceAdminScreen({ user, onBack }: { user: AttendanceUser; onBack: () 
           <span className="admin-profile__secure">● ĐÃ XÁC THỰC</span>
         </section>
 
-        <div className="device-stats">
+        <nav className="admin-tabs" aria-label="Chức năng quản trị">
+          <button className={section === "DEVICES" ? "active" : ""} onClick={() => setSection("DEVICES")}>▣ Thiết bị</button>
+          <button className={section === "PRESENCE" ? "active" : ""} onClick={() => setSection("PRESENCE")}>▦ Presence QR</button>
+        </nav>
+
+        {section === "PRESENCE" ? <PresenceAdminPanel /> : <><div className="device-stats">
           <button className={filter === "PENDING" ? "active" : ""} onClick={() => setFilter("PENDING")}><strong>{counts.PENDING}</strong><span>Chờ duyệt</span></button>
           <button className={filter === "TRUSTED" ? "active" : ""} onClick={() => setFilter("TRUSTED")}><strong>{counts.TRUSTED}</strong><span>Đã duyệt</span></button>
           <button className={filter === "BLOCKED" ? "active" : ""} onClick={() => setFilter("BLOCKED")}><strong>{counts.BLOCKED}</strong><span>Đã khóa</span></button>
@@ -351,7 +424,7 @@ function DeviceAdminScreen({ user, onBack }: { user: AttendanceUser; onBack: () 
               </div>
             </article>
           ))}
-        </div>
+        </div></>}
       </main>
     </section>
   );
@@ -558,7 +631,118 @@ function FaceScreen({ onBack, onComplete }: { onBack: () => void; onComplete: ()
         {cameraState === "ready" && scanState === "idle" && <button className="primary-button camera-action" onClick={startScan}>Bắt đầu quét thử</button>}
         {scanState === "scanning" && <button className="primary-button camera-action" disabled>Đang kiểm tra người thật…</button>}
         {error && <p className="camera-error" role="alert">{error}</p>}
-        {scanState === "captured" && <button className="primary-button camera-action" onClick={complete} disabled={submitting}>{submitting ? "Đang ghi nhận chấm công…" : "Xác nhận chấm công"}</button>}
+        {scanState === "captured" && <button className="primary-button camera-action" onClick={complete} disabled={submitting}>{submitting ? "Đang chuyển bước…" : "Tiếp tục xác minh tại cơ sở"}</button>}
+      </main>
+    </section>
+  );
+}
+
+function PresenceScreen({ precheck, onBack, onVerified }: { precheck: PrecheckData; onBack: () => void; onVerified: (proofId: string) => Promise<void> }) {
+  const [code, setCode] = useState("");
+  const [scanning, setScanning] = useState(false);
+  const [verifying, setVerifying] = useState(false);
+  const [error, setError] = useState("");
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const frameRef = useRef(0);
+
+  useEffect(() => () => {
+    if (frameRef.current) window.cancelAnimationFrame(frameRef.current);
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+  }, []);
+
+  function stopScanner() {
+    if (frameRef.current) window.cancelAnimationFrame(frameRef.current);
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    setScanning(false);
+  }
+
+  async function submit(input: { qrToken?: string; code?: string }) {
+    setVerifying(true);
+    setError("");
+    try {
+      const proof = await verifyPresenceChallenge(input);
+      stopScanner();
+      await onVerified(proof.proofId);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Không thể xác minh hiện diện.");
+      setVerifying(false);
+    }
+  }
+
+  async function startScanner() {
+    setError("");
+    const Detector = (window as unknown as { BarcodeDetector?: BarcodeDetectorConstructor }).BarcodeDetector;
+    if (!Detector) {
+      setError("Trình duyệt chưa hỗ trợ quét QR trực tiếp. Hãy nhập mã 6 số hiển thị tại cơ sở.");
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
+      streamRef.current = stream;
+      if (!videoRef.current) return;
+      videoRef.current.srcObject = stream;
+      await videoRef.current.play();
+      setScanning(true);
+      const detector = new Detector({ formats: ["qr_code"] });
+      const scan = async () => {
+        if (!videoRef.current || verifying) return;
+        try {
+          const codes = await detector.detect(videoRef.current);
+          if (codes[0]?.rawValue) {
+            await submit({ qrToken: codes[0].rawValue });
+            return;
+          }
+        } catch {
+          // Some browsers throw while the first camera frames are still loading.
+        }
+        frameRef.current = window.requestAnimationFrame(scan);
+      };
+      frameRef.current = window.requestAnimationFrame(scan);
+    } catch {
+      setError("Không thể mở camera sau. Hãy cấp quyền camera hoặc nhập mã 6 số.");
+      stopScanner();
+    }
+  }
+
+  function submitCode(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!/^\d{6}$/.test(code)) {
+      setError("Mã hiện diện phải gồm đúng 6 chữ số.");
+      return;
+    }
+    void submit({ code });
+  }
+
+  return (
+    <section className="screen presence-screen" aria-labelledby="presence-title">
+      <header className="flow-header">
+        <button className="back-button" onClick={onBack} aria-label="Quay lại">←</button>
+        <div><h1 id="presence-title">Xác minh tại cơ sở</h1><span>Bước 3/3 · QR động</span></div>
+        <span className="header-spacer" />
+      </header>
+      <div className="stepper" aria-label="Tiến trình chấm công"><span className="done" /><span className="done" /><span className="done" /></div>
+
+      <main className="presence-content">
+        <div className="presence-branch"><span>⌖</span><div><small>ĐIỂM ĐANG XÁC MINH</small><strong>{precheck.branch.name}</strong><p>{precheck.branch.address}</p></div></div>
+
+        <div className={`presence-scanner ${scanning ? "is-scanning" : ""}`}>
+          <video ref={videoRef} muted playsInline />
+          <div className="presence-scanner__frame"><i /><i /><i /><i />{!scanning && <span>▦</span>}</div>
+          {scanning && <b>Đưa mã QR vào giữa khung</b>}
+        </div>
+
+        {!scanning && <button className="primary-button presence-scan-button" onClick={() => void startScanner()} disabled={verifying}>▦ Quét QR tại điểm chấm công</button>}
+        {scanning && <button className="secondary-button presence-stop-button" onClick={stopScanner}>Dừng camera</button>}
+
+        <div className="presence-divider"><span>hoặc nhập mã 6 số</span></div>
+        <form className="presence-code-form" onSubmit={submitCode}>
+          <input inputMode="numeric" pattern="[0-9]*" maxLength={6} value={code} onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, 6))} placeholder="000 000" aria-label="Mã hiện diện 6 số" />
+          <button type="submit" disabled={verifying || code.length !== 6}>{verifying ? "Đang xác minh…" : "Xác minh"}</button>
+        </form>
+        <p className="presence-security">● QR được ký bởi FASTDO, giới hạn theo chi nhánh và chống sử dụng lại.</p>
+        {error && <p className="camera-error" role="alert">{error}</p>}
       </main>
     </section>
   );
@@ -708,9 +892,9 @@ export function AttendancePrototype() {
     setScreen("login");
   }
 
-  async function completeCheckIn() {
+  async function completeCheckIn(presenceToken: string) {
     const currentLocation = location ?? await readCurrentLocation(firebaseDemoMode());
-    const result = await submitCheckIn(currentLocation);
+    const result = await submitCheckIn(currentLocation, presenceToken);
     setCheckInResult(result);
     setScreen("success");
   }
@@ -759,7 +943,8 @@ export function AttendancePrototype() {
           {screen === "home" && user && <HomeScreen time={time} date={date} user={user} precheck={precheck} onCheckIn={() => setScreen("precheck")} onManageDevices={() => setScreen("devices")} onLogout={() => void handleLogout()} />}
           {screen === "devices" && user?.canManageDevices && <DeviceAdminScreen user={user} onBack={() => setScreen("home")} />}
           {screen === "precheck" && <PrecheckScreen onBack={() => setScreen("home")} onContinue={(data, currentLocation) => { setPrecheck(data); setLocation(currentLocation); setScreen("face"); }} />}
-          {screen === "face" && <FaceScreen onBack={() => setScreen("precheck")} onComplete={completeCheckIn} />}
+          {screen === "face" && <FaceScreen onBack={() => setScreen("precheck")} onComplete={async () => setScreen("presence")} />}
+          {screen === "presence" && precheck && <PresenceScreen precheck={precheck} onBack={() => setScreen("face")} onVerified={completeCheckIn} />}
           {screen === "success" && checkInResult && precheck && <SuccessScreen result={checkInResult} precheck={precheck} onStart={() => setScreen("session")} />}
           {screen === "session" && checkInResult && precheck && <SessionScreen result={checkInResult} precheck={precheck} onCheckOut={completeCheckOut} onHeartbeat={syncActiveSession} />}
           {toast && <div className="toast" role="status"><span>✓</span>{toast}</div>}

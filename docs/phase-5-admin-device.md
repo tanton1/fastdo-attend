@@ -21,7 +21,7 @@ SUPER_ADMIN                      → quyền quản trị thiết bị theo comp
 
 Quản trị viên không cần được phân ca mới có thể sử dụng bảng duyệt thiết bị. Các API chấm công vẫn yêu cầu phân ca hợp lệ.
 
-Tài khoản pilot `FD0238` đang giữ vai trò `COMPANY_ADMIN` để vận hành bảng quản trị trong giai đoạn MVP. Trước pilot nhiều người dùng nên tạo tài khoản quản trị riêng và đưa tài khoản nhân viên này về `EMPLOYEE` để tách nhiệm vụ.
+Đã tạo tài khoản quản trị riêng `ADMIN001` với vai trò `COMPANY_ADMIN`. Tài khoản này có thể quản lý thiết bị và phát Presence QR mà không cần được phân ca.
 
 ## Luồng vận hành
 

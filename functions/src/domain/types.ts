@@ -60,3 +60,27 @@ export interface DeviceDocument {
   reviewedAt: Timestamp | null;
   reviewedBy: string | null;
 }
+
+export interface PresenceChallengeDocument {
+  companyId: string;
+  branchId: string;
+  createdBy: string;
+  code: string;
+  tokenHash: string;
+  nonce: string;
+  status: "ACTIVE" | "REVOKED";
+  createdAt: Timestamp;
+  expiresAt: Timestamp;
+}
+
+export interface PresenceProofDocument {
+  companyId: string;
+  branchId: string;
+  challengeId: string;
+  userId: string;
+  deviceId: string;
+  createdAt: Timestamp;
+  expiresAt: Timestamp;
+  usedAt: Timestamp | null;
+  usedEventId: string | null;
+}

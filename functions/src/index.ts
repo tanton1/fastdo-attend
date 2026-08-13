@@ -1,11 +1,13 @@
 import { initializeApp } from "firebase-admin/app";
+import { randomInt, randomUUID } from "node:crypto";
 import { GeoPoint, Timestamp, getFirestore } from "firebase-admin/firestore";
 import { HttpsError, onCall } from "firebase-functions/v2/https";
 import { setGlobalOptions } from "firebase-functions/v2/options";
 import { distanceInMeters } from "./domain/geo";
 import { calculateAttendanceRisk } from "./domain/risk";
 import { deviceCanCheckIn, sanitizePlatform } from "./domain/device";
-import type { DeviceDocument, DeviceStatus, EmployeeDocument } from "./domain/types";
+import { createPresenceNonce, hashPresenceQr, isSixDigitPresenceCode, signPresenceQr, verifyPresenceQr } from "./domain/presence";
+import type { BranchDocument, DeviceDocument, DeviceStatus, EmployeeDocument, PresenceChallengeDocument, PresenceProofDocument } from "./domain/types";
 import { buildAuditLogDocument, writeAuditLog } from "./services/audit";
 import { MANAGER_ROLES, loadAttendanceContext, loadEmployeeContext, loadManagerContext, requireUserId } from "./services/context";
 import { publicDeviceStatus, readOwnedDevice, registerOrTouchDevice, requireDeviceId } from "./services/devices";
@@ -16,6 +18,7 @@ initializeApp();
 setGlobalOptions({ region: "asia-southeast1", maxInstances: 10, memory: "256MiB", timeoutSeconds: 30 });
 
 const callableOptions = { enforceAppCheck: process.env.FUNCTIONS_EMULATOR !== "true" } as const;
+const presenceCallableOptions = { ...callableOptions, secrets: ["PRESENCE_SIGNING_KEY"] };
 
 interface LocationInput {
   latitude: number;
@@ -41,6 +44,22 @@ interface DeviceReviewInput {
   deviceId: string;
   decision: Extract<DeviceStatus, "TRUSTED" | "BLOCKED">;
   reason?: string;
+}
+
+interface PresenceChallengeInput {
+  branchId?: string;
+}
+
+interface PresenceVerificationInput {
+  deviceId: string;
+  qrToken?: string;
+  code?: string;
+}
+
+function presenceSigningSecret(): string {
+  const secret = process.env.PRESENCE_SIGNING_KEY;
+  if (!secret || secret.length < 32) throw new HttpsError("internal", "Khóa ký QR hiện diện chưa được cấu hình.");
+  return secret;
 }
 
 function requireAttendanceInput(input: AttendanceInput): void {
@@ -164,6 +183,141 @@ export const reviewDevice = onCall<DeviceReviewInput>(callableOptions, async (re
   return { deviceId, status: decision, trusted: decision === "TRUSTED" };
 });
 
+export const createPresenceChallenge = onCall<PresenceChallengeInput>(presenceCallableOptions, async (request) => {
+  const userId = requireUserId(request);
+  const context = await loadManagerContext(userId);
+  await enforceRateLimit(userId, "createPresenceChallenge", 15);
+  const branchId = typeof request.data?.branchId === "string" && request.data.branchId.trim()
+    ? request.data.branchId.trim()
+    : context.employee.branchIds?.[0];
+  if (!branchId || !context.employee.branchIds?.includes(branchId)) {
+    throw new HttpsError("permission-denied", "Bạn không có quyền phát mã cho chi nhánh này.");
+  }
+
+  const db = getFirestore();
+  const branchSnapshot = await db.doc(`branches/${branchId}`).get();
+  if (!branchSnapshot.exists) throw new HttpsError("not-found", "Không tìm thấy chi nhánh.");
+  const branch = branchSnapshot.data() as BranchDocument;
+  if (branch.companyId !== context.employee.companyId || !branch.isActive) {
+    throw new HttpsError("permission-denied", "Chi nhánh không thuộc phạm vi quản trị.");
+  }
+
+  const now = Timestamp.now();
+  const expiresAt = Timestamp.fromMillis(now.toMillis() + 45_000);
+  const challengeId = randomUUID();
+  const code = String(randomInt(100000, 1_000_000));
+  const nonce = createPresenceNonce();
+  const qrToken = signPresenceQr({
+    version: 1,
+    challengeId,
+    companyId: context.employee.companyId,
+    branchId,
+    expiresAtSeconds: Math.floor(expiresAt.toMillis() / 1000),
+    nonce,
+  }, presenceSigningSecret());
+  const challenge: PresenceChallengeDocument = {
+    companyId: context.employee.companyId,
+    branchId,
+    createdBy: userId,
+    code,
+    tokenHash: hashPresenceQr(qrToken),
+    nonce,
+    status: "ACTIVE",
+    createdAt: now,
+    expiresAt,
+  };
+  const batch = db.batch();
+  batch.create(db.doc(`presenceChallenges/${challengeId}`), challenge);
+  batch.set(db.doc(`presenceCodes/${context.employee.companyId}_${code}`), { challengeId, companyId: context.employee.companyId, expiresAt });
+  batch.create(db.collection("auditLogs").doc(), buildAuditLogDocument(request, context, {
+    action: "PRESENCE_CHALLENGE_CREATED",
+    targetType: "PRESENCE_CHALLENGE",
+    targetId: challengeId,
+    metadata: { branchId, expiresAt: expiresAt.toDate().toISOString() },
+  }));
+  await batch.commit();
+  return {
+    challengeId,
+    qrToken,
+    code,
+    branch: { id: branchId, name: branch.name },
+    expiresAt: expiresAt.toDate().toISOString(),
+  };
+});
+
+export const verifyPresenceChallenge = onCall<PresenceVerificationInput>(presenceCallableOptions, async (request) => {
+  const userId = requireUserId(request);
+  const context = await loadAttendanceContext(userId);
+  await enforceRateLimit(userId, "verifyPresenceChallenge", 12);
+  const device = await readOwnedDevice(context, request.data?.deviceId);
+  if (!device || !deviceCanCheckIn(device.status, device.isBlocked)) {
+    throw new HttpsError("failed-precondition", "Thiết bị phải được duyệt trước khi xác minh hiện diện.");
+  }
+
+  const db = getFirestore();
+  let challengeId = "";
+  let expectedTokenHash: string | null = null;
+  if (typeof request.data?.qrToken === "string" && request.data.qrToken.length <= 1600) {
+    const payload = verifyPresenceQr(request.data.qrToken, presenceSigningSecret());
+    if (!payload || payload.expiresAtSeconds * 1000 <= Date.now()) throw new HttpsError("failed-precondition", "Mã QR không hợp lệ hoặc đã hết hạn.");
+    if (payload.companyId !== context.employee.companyId || payload.branchId !== context.branchId) {
+      throw new HttpsError("permission-denied", "Mã QR không thuộc chi nhánh chấm công của bạn.");
+    }
+    challengeId = payload.challengeId;
+    expectedTokenHash = hashPresenceQr(request.data.qrToken);
+  } else if (isSixDigitPresenceCode(request.data?.code)) {
+    const codeSnapshot = await db.doc(`presenceCodes/${context.employee.companyId}_${request.data.code}`).get();
+    if (!codeSnapshot.exists) throw new HttpsError("not-found", "Mã hiện diện không tồn tại hoặc đã hết hạn.");
+    challengeId = String(codeSnapshot.data()?.challengeId ?? "");
+  } else {
+    throw new HttpsError("invalid-argument", "Cần quét QR hoặc nhập mã hiện diện 6 số.");
+  }
+
+  const challengeRef = db.doc(`presenceChallenges/${challengeId}`);
+  const proofId = `${challengeId}_${userId}`;
+  const proofRef = db.doc(`presenceProofs/${proofId}`);
+  const now = Timestamp.now();
+  const proofExpiresAt = Timestamp.fromMillis(now.toMillis() + 90_000);
+  await db.runTransaction(async (transaction) => {
+    const [challengeSnapshot, proofSnapshot] = await Promise.all([transaction.get(challengeRef), transaction.get(proofRef)]);
+    if (!challengeSnapshot.exists) throw new HttpsError("not-found", "Mã hiện diện không tồn tại.");
+    const challenge = challengeSnapshot.data() as PresenceChallengeDocument;
+    if (challenge.status !== "ACTIVE" || challenge.expiresAt.toMillis() <= now.toMillis()) {
+      throw new HttpsError("failed-precondition", "Mã hiện diện đã hết hạn.");
+    }
+    if (challenge.companyId !== context.employee.companyId || challenge.branchId !== context.branchId) {
+      throw new HttpsError("permission-denied", "Mã hiện diện không thuộc ca làm hiện tại.");
+    }
+    if (expectedTokenHash && challenge.tokenHash !== expectedTokenHash) throw new HttpsError("permission-denied", "Chữ ký QR không hợp lệ.");
+    if (!expectedTokenHash && challenge.code !== request.data.code) throw new HttpsError("permission-denied", "Mã hiện diện không hợp lệ.");
+
+    if (proofSnapshot.exists) {
+      const proof = proofSnapshot.data() as PresenceProofDocument;
+      if (proof.usedAt) throw new HttpsError("already-exists", "Bằng chứng hiện diện này đã được sử dụng.");
+      if (proof.expiresAt.toMillis() > now.toMillis()) return;
+    }
+    const proof: PresenceProofDocument = {
+      companyId: context.employee.companyId,
+      branchId: context.branchId,
+      challengeId,
+      userId,
+      deviceId: request.data.deviceId,
+      createdAt: now,
+      expiresAt: proofExpiresAt,
+      usedAt: null,
+      usedEventId: null,
+    };
+    transaction.set(proofRef, proof);
+    transaction.create(db.collection("auditLogs").doc(), buildAuditLogDocument(request, context, {
+      action: "PRESENCE_VERIFIED",
+      targetType: "PRESENCE_PROOF",
+      targetId: proofId,
+      metadata: { challengeId, branchId: context.branchId },
+    }));
+  });
+  return { proofId, branchId: context.branchId, expiresAt: proofExpiresAt.toDate().toISOString() };
+});
+
 export const getPrecheck = onCall<PrecheckInput>(callableOptions, async (request) => {
   const userId = requireUserId(request);
   const context = await loadAttendanceContext(userId);
@@ -190,7 +344,7 @@ export const getPrecheck = onCall<PrecheckInput>(callableOptions, async (request
       location: true,
       faceVerification: false,
       liveness: false,
-      presenceProof: false,
+      presenceProof: true,
     },
   };
 });
@@ -213,6 +367,10 @@ export const checkIn = onCall<AttendanceInput>(callableOptions, async (request) 
     throw new HttpsError("failed-precondition", "Thiết bị chưa được quản trị viên phê duyệt.");
   }
   const db = getFirestore();
+  if (!request.data.presenceToken || !/^[A-Za-z0-9_-]{20,160}$/.test(request.data.presenceToken)) {
+    throw new HttpsError("failed-precondition", "Bạn cần xác minh QR hiện diện trước khi chấm công.");
+  }
+  const presenceProofRef = db.doc(`presenceProofs/${request.data.presenceToken}`);
   const idempotencyRef = db.doc(`idempotencyKeys/${userId}_${request.data.idempotencyKey}`);
   const eventRef = db.collection("attendanceEvents").doc();
   const sessionRef = db.collection("workSessions").doc();
@@ -224,7 +382,7 @@ export const checkIn = onCall<AttendanceInput>(callableOptions, async (request) 
   const insideGeofence = distance <= context.branch.geofenceRadiusMeters + Math.min(request.data.location.accuracy, 30);
   // Face/liveness/presence become required once their providers are connected.
   // Until then, missing optional signals must not create a false fraud score.
-  const activePolicy = { faceVerification: false, liveness: false, presenceProof: false };
+  const activePolicy = { faceVerification: false, liveness: false, presenceProof: true };
 
   const risk = calculateAttendanceRisk({
     insideGeofence,
@@ -232,7 +390,7 @@ export const checkIn = onCall<AttendanceInput>(callableOptions, async (request) 
     deviceTrusted: trustedDevice,
     faceVerified: !activePolicy.faceVerification || Boolean(request.data.faceSessionId),
     livenessVerified: !activePolicy.liveness || Boolean(request.data.faceSessionId),
-    presenceVerified: !activePolicy.presenceProof || Boolean(request.data.presenceToken),
+    presenceVerified: true,
     offline: Boolean(request.data.offline),
     clockDifferenceSeconds,
   });
@@ -240,6 +398,16 @@ export const checkIn = onCall<AttendanceInput>(callableOptions, async (request) 
   const result = await db.runTransaction(async (transaction) => {
     const existing = await transaction.get(idempotencyRef);
     if (existing.exists) return existing.data()?.response;
+
+    const presenceProofSnapshot = await transaction.get(presenceProofRef);
+    if (!presenceProofSnapshot.exists) throw new HttpsError("failed-precondition", "Bằng chứng hiện diện không tồn tại.");
+    const presenceProof = presenceProofSnapshot.data() as PresenceProofDocument;
+    if (presenceProof.userId !== userId || presenceProof.deviceId !== request.data.deviceId || presenceProof.companyId !== context.employee.companyId || presenceProof.branchId !== context.branchId) {
+      throw new HttpsError("permission-denied", "Bằng chứng hiện diện không thuộc phiên chấm công này.");
+    }
+    if (presenceProof.usedAt || presenceProof.expiresAt.toMillis() <= now.toMillis()) {
+      throw new HttpsError("failed-precondition", "Bằng chứng hiện diện đã dùng hoặc hết hạn.");
+    }
 
     const activeSessions = await transaction.get(
       db.collection("workSessions").where("userId", "==", userId).where("status", "==", "ACTIVE").limit(1),
@@ -278,7 +446,8 @@ export const checkIn = onCall<AttendanceInput>(callableOptions, async (request) 
       deviceId: request.data.deviceId,
       deviceVerified: trustedDevice,
       faceSessionId: request.data.faceSessionId ?? null,
-      presenceVerified: Boolean(request.data.presenceToken),
+      presenceProofId: request.data.presenceToken,
+      presenceVerified: true,
       riskScore: risk.score,
       riskLevel: risk.level,
       riskReasons: risk.reasons,
@@ -301,6 +470,7 @@ export const checkIn = onCall<AttendanceInput>(callableOptions, async (request) 
     });
 
     transaction.create(idempotencyRef, { userId, operation: "CHECK_IN", createdAt: now, response });
+    transaction.update(presenceProofRef, { usedAt: now, usedEventId: eventRef.id });
     transaction.create(auditRef, buildAuditLogDocument(request, context, {
       action: "ATTENDANCE_CHECK_IN_DECIDED",
       targetType: "ATTENDANCE_EVENT",

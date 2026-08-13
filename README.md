@@ -1,9 +1,9 @@
 # FASTDO ATTEND
 
-PWA chấm công nhân viên theo phong cách **Black Ignite**, kết hợp Firebase Authentication, Firestore, GPS geofence, thiết bị tin cậy và risk scoring. Luồng hiện có:
+PWA chấm công nhân viên theo phong cách **Black Ignite**, kết hợp Firebase Authentication, Firestore, GPS geofence, thiết bị tin cậy, Presence QR ký số và risk scoring. Luồng hiện có:
 
 ```text
-Đăng nhập → Home → Pre-check → Camera → Check-in → Đang trong ca → Check-out
+Đăng nhập → Home → Pre-check → Camera → Presence QR → Check-in → Đang trong ca → Check-out
 ```
 
 ## Trạng thái Firebase
@@ -12,10 +12,11 @@ PWA chấm công nhân viên theo phong cách **Black Ignite**, kết hợp Fire
 - Region dữ liệu và Functions: `asia-southeast1`
 - Firebase Authentication: Email/Password đã bật
 - Firestore: database `(default)` đã tạo, rules và indexes đã triển khai
-- Cloud Functions thế hệ 2: 9 callable API chấm công, hồ sơ và quản lý thiết bị đang chạy Node.js 22
+- Cloud Functions thế hệ 2: 11 callable API chấm công, hồ sơ, thiết bị và Presence QR đang chạy Node.js 22
 - Firebase App Check: reCAPTCHA Enterprise đã bật enforcement cho toàn bộ callable Functions production
 - Thiết bị mới phải được quản trị viên duyệt trước khi GPS/check-in được thực hiện
 - Quản trị viên có bảng điều khiển trong PWA để lọc, duyệt, khóa và mở khóa thiết bị
+- QR hiện diện được ký bằng khóa trong Secret Manager, hết hạn sau 45 giây; proof của nhân viên chỉ dùng một lần
 - Vercel production chạy `NEXT_PUBLIC_FIREBASE_DEMO_MODE=false`; local vẫn có thể chọn demo hoặc emulator
 
 ## Chạy ứng dụng
@@ -77,6 +78,7 @@ npm run firebase:deploy:functions
 - [Kế hoạch giai đoạn tiếp theo](docs/phase-3-roadmap.md)
 - [App Check và thiết bị tin cậy](docs/phase-4-security-device.md)
 - [Bảng quản trị thiết bị](docs/phase-5-admin-device.md)
+- [Presence QR động](docs/phase-6-presence-qr.md)
 
 ## Lưu ý về Face ID và Wi-Fi
 

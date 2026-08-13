@@ -22,7 +22,7 @@ Ngoài bốn API chấm công, backend có thêm:
 - `reviewDevice`: quản trị viên duyệt hoặc chặn thiết bị và tạo audit log bất biến.
 - `getMyProfile`: trả hồ sơ, vai trò và quyền quản trị của người dùng đang đăng nhập.
 
-Tất cả chín callable Functions production đều yêu cầu đồng thời Firebase Auth và App Check hợp lệ. Emulator tự tắt enforcement để phục vụ kiểm thử local.
+Tất cả callable Functions production, bao gồm Presence QR, đều yêu cầu đồng thời Firebase Auth và App Check hợp lệ. Emulator tự tắt enforcement để phục vụ kiểm thử local.
 
 ## Trạng thái thiết bị
 

@@ -33,6 +33,20 @@ export interface DeviceReviewResult {
   trusted: boolean;
 }
 
+export interface PresenceChallenge {
+  challengeId: string;
+  qrToken: string;
+  code: string;
+  branch: { id: string; name: string };
+  expiresAt: string;
+}
+
+export interface PresenceProof {
+  proofId: string;
+  branchId: string;
+  expiresAt: string;
+}
+
 export interface PrecheckData {
   serverTime: string;
   employee: { id: string; name: string; employeeCode: string };
