@@ -1,5 +1,7 @@
 # Changelog
 
+- Smoke suite emulator đã được làm mới theo API hiện tại, bao phủ manager/employee/device/presence proof, check-in idempotency, check-out, request/leave approval, report và payroll export.
+
 ## Unreleased — Operations workflow
 
 - Thêm yêu cầu điều chỉnh công có trạng thái `PENDING/APPROVED/REJECTED/CANCELLED`, audit và adjustment bất biến cho payroll.
