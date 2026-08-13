@@ -313,3 +313,58 @@ export interface FaceConsentWithdrawal {
   revokedProofs: number;
   withdrawnAt: string;
 }
+
+export type AttendanceRequestStatus = "PENDING" | "APPROVED" | "REJECTED" | "CANCELLED";
+
+export interface AttendanceRequest {
+  id: string;
+  eventId: string;
+  userId: string;
+  employeeName: string;
+  employeeCode: string;
+  branchId: string;
+  branchName: string;
+  requestedTimestamp: string;
+  reason: string;
+  status: AttendanceRequestStatus;
+  createdAt: string;
+  reviewedAt: string | null;
+  reviewedBy: string | null;
+  reviewNote: string | null;
+}
+
+export type LeaveRequestStatus = "PENDING" | "APPROVED" | "REJECTED" | "CANCELLED";
+export type LeaveType = "ANNUAL" | "SICK" | "UNPAID" | "OTHER";
+
+export interface LeaveRequest {
+  id: string;
+  userId: string;
+  employeeName: string;
+  employeeCode: string;
+  branchId: string;
+  branchName: string;
+  startDate: string;
+  endDate: string;
+  leaveType: LeaveType;
+  reason: string;
+  status: LeaveRequestStatus;
+  createdAt: string;
+  reviewedAt: string | null;
+  reviewedBy: string | null;
+  reviewNote: string | null;
+}
+
+export interface PayrollExport {
+  filename: string;
+  csv: string;
+  rowCount: number;
+  truncated: boolean;
+}
+
+export interface AttendanceSelfEvent {
+  id: string;
+  type: "CHECK_IN" | "CHECK_OUT";
+  status: string;
+  serverTimestamp: string | null;
+  branchId: string;
+}

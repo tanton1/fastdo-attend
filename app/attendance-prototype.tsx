@@ -4,10 +4,10 @@ import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import QRCode from "qrcode";
 import { firebaseDemoMode } from "./lib/firebase-client";
-import { assignEmployeeShift, changeTemporaryPassword, completeFaceSession, createEmployee, createPresenceChallenge, getAdminWorkforce, getAttendanceReport, getPilotPolicy, getPrecheck, getRealtimeMonitor, listManagedDevices, loginEmployee, logoutEmployee, readCurrentLocation, requestPasswordReset, resetEmployeeFace, restoreAuthenticatedUser, reviewManagedDevice, sendLocationHeartbeat, startFaceSession, submitCheckIn, submitCheckOut, updateEmployee, updatePilotPolicy, verifyPresenceChallenge, withdrawFaceConsent } from "./lib/attendance-api";
-import type { AdminDevice, AdminWorkforce, AttendanceReport, AttendanceUser, CheckInResult, DeviceLocation, DeviceStatus, FaceChallenge, FaceEnrollmentStatus, FaceEvidence, FacePurpose, LocationHeartbeatResult, PilotBranchPolicy, PilotEnforcementMode, PrecheckData, PresenceChallenge, RealtimeMonitor, WorkforceBranch, WorkforceEmployee } from "./lib/attendance-types";
+import { assignEmployeeShift, changeTemporaryPassword, completeFaceSession, createAttendanceRequest, createEmployee, createLeaveRequest, createPresenceChallenge, exportPayrollCsv, getAdminWorkforce, getAttendanceReport, getMyAttendanceEvents, getPilotPolicy, getPrecheck, getRealtimeMonitor, listAttendanceRequests, listLeaveRequests, listManagedDevices, loginEmployee, logoutEmployee, readCurrentLocation, requestPasswordReset, resetEmployeeFace, restoreAuthenticatedUser, reviewAttendanceRequest, reviewLeaveRequest, reviewManagedDevice, sendLocationHeartbeat, startFaceSession, submitCheckIn, submitCheckOut, updateEmployee, updatePilotPolicy, verifyPresenceChallenge, withdrawFaceConsent } from "./lib/attendance-api";
+import type { AdminDevice, AdminWorkforce, AttendanceReport, AttendanceRequest, AttendanceSelfEvent, AttendanceUser, CheckInResult, DeviceLocation, DeviceStatus, FaceChallenge, FaceEnrollmentStatus, FaceEvidence, FacePurpose, LeaveRequest, LeaveType, LocationHeartbeatResult, PilotBranchPolicy, PilotEnforcementMode, PrecheckData, PresenceChallenge, RealtimeMonitor, WorkforceBranch, WorkforceEmployee } from "./lib/attendance-types";
 
-type Screen = "login" | "password" | "home" | "profile" | "devices" | "precheck" | "face" | "presence" | "success" | "session";
+type Screen = "login" | "password" | "home" | "profile" | "requests" | "devices" | "precheck" | "face" | "presence" | "success" | "session";
 type CheckState = "waiting" | "checking" | "success" | "warning";
 
 interface BarcodeDetectorLike {
@@ -47,6 +47,8 @@ const checks = [
 
 const REPORT_TODAY = new Date().toISOString().slice(0, 10);
 const REPORT_WEEK_AGO = new Date(new Date().getTime() - 6 * 86400000).toISOString().slice(0, 10);
+const REQUEST_DEFAULT_TIMESTAMP = new Date(Date.now() - 3600000).toISOString().slice(0, 16);
+const REQUEST_DEFAULT_DATE = new Date().toISOString().slice(0, 10);
 
 function Brand({ compact = false }: { compact?: boolean }) {
   return (
@@ -227,7 +229,7 @@ function ChangeTemporaryPasswordScreen({ user, onChanged, onLogout }: { user: At
   );
 }
 
-function HomeScreen({ time, date, user, precheck, onCheckIn, onManageDevices, onProfile }: { time: string; date: string; user: AttendanceUser; precheck: PrecheckData | null; onCheckIn: () => void; onManageDevices: () => void; onProfile: () => void }) {
+function HomeScreen({ time, date, user, precheck, onCheckIn, onManageDevices, onProfile, onRequests }: { time: string; date: string; user: AttendanceUser; precheck: PrecheckData | null; onCheckIn: () => void; onManageDevices: () => void; onProfile: () => void; onRequests: () => void }) {
   const initials = user.fullName.trim().split(/\s+/).slice(-2).map((part) => part[0]).join("").toUpperCase();
   return (
     <section className="screen home-screen" aria-labelledby="home-title">
@@ -287,7 +289,7 @@ function HomeScreen({ time, date, user, precheck, onCheckIn, onManageDevices, on
         <button className="active"><span>⌂</span>Trang chủ</button>
         <button><span>□</span>Lịch làm</button>
         <button className="nav-main" onClick={onCheckIn} aria-label="Bắt đầu chấm công"><span>⌘</span></button>
-        <button><span>◷</span>Lịch sử</button>
+        <button onClick={onRequests}><span>◷</span>Lịch sử</button>
         {user.canManageDevices
           ? <button onClick={onManageDevices}><span>⚙</span>Quản trị</button>
           : <button onClick={onProfile}><span>♙</span>Cá nhân</button>}
@@ -348,6 +350,103 @@ function ProfileScreen({ user, onBack, onLogout, onWithdrawn }: { user: Attendan
           {faceStatus !== "NOT_STARTED" ? <button className="danger-button" onClick={() => void withdraw()} disabled={withdrawing}>{withdrawing ? "Đang xóa an toàn…" : "Rút đồng ý & xóa mẫu"}</button> : <div className="face-consent-empty">Chưa có mẫu Face AI để xóa.</div>}
         </section>
         <button className="secondary-button profile-logout" onClick={onLogout}>Đăng xuất tài khoản</button>
+      </main>
+    </section>
+  );
+}
+
+function requestStatusLabel(status: string): string {
+  return status === "PENDING" ? "Chờ duyệt" : status === "APPROVED" ? "Đã duyệt" : status === "REJECTED" ? "Từ chối" : "Đã hủy";
+}
+
+function leaveTypeLabel(type: LeaveType): string {
+  return type === "ANNUAL" ? "Phép năm" : type === "SICK" ? "Nghỉ ốm" : type === "UNPAID" ? "Không lương" : "Khác";
+}
+
+function RequestsScreen({ onBack }: { onBack: () => void }) {
+  const [tab, setTab] = useState<"CORRECTION" | "LEAVE">("CORRECTION");
+  const [events, setEvents] = useState<AttendanceSelfEvent[]>([]);
+  const [corrections, setCorrections] = useState<AttendanceRequest[]>([]);
+  const [leaves, setLeaves] = useState<LeaveRequest[]>([]);
+  const [eventId, setEventId] = useState("");
+  const [requestedTimestamp, setRequestedTimestamp] = useState(REQUEST_DEFAULT_TIMESTAMP);
+  const [correctionReason, setCorrectionReason] = useState("");
+  const [startDate, setStartDate] = useState(REQUEST_DEFAULT_DATE);
+  const [endDate, setEndDate] = useState(REQUEST_DEFAULT_DATE);
+  const [leaveType, setLeaveType] = useState<LeaveType>("ANNUAL");
+  const [leaveReason, setLeaveReason] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const [eventRows, correctionRows, leaveRows] = await Promise.all([getMyAttendanceEvents(), listAttendanceRequests(), listLeaveRequests()]);
+      setEvents(eventRows);
+      setCorrections(correctionRows);
+      setLeaves(leaveRows);
+      setEventId((current) => current || eventRows[0]?.id || "");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Không thể tải yêu cầu của bạn.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => void load(), 0);
+    return () => window.clearTimeout(timer);
+  }, [load]);
+
+  async function submitCorrection(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!eventId || !correctionReason.trim()) { setError("Chọn sự kiện và nhập lý do điều chỉnh."); return; }
+    setSubmitting(true); setError(""); setNotice("");
+    try {
+      await createAttendanceRequest({ eventId, requestedTimestamp: new Date(requestedTimestamp).toISOString(), reason: correctionReason });
+      setCorrectionReason(""); setNotice("Đã gửi yêu cầu điều chỉnh công cho người duyệt."); await load();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Không thể gửi yêu cầu điều chỉnh công."); }
+    finally { setSubmitting(false); }
+  }
+
+  async function submitLeave(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!leaveReason.trim() || endDate < startDate) { setError("Kiểm tra khoảng ngày và nhập lý do nghỉ phép."); return; }
+    setSubmitting(true); setError(""); setNotice("");
+    try {
+      await createLeaveRequest({ startDate, endDate, leaveType, reason: leaveReason });
+      setLeaveReason(""); setNotice("Đã gửi yêu cầu nghỉ phép cho người duyệt."); await load();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Không thể gửi yêu cầu nghỉ phép."); }
+    finally { setSubmitting(false); }
+  }
+
+  return (
+    <section className="screen profile-screen" aria-labelledby="requests-title">
+      <header className="flow-header"><button className="back-button" onClick={onBack} aria-label="Quay lại">←</button><div><h1 id="requests-title">Yêu cầu & lịch sử</h1><span>Điều chỉnh công và nghỉ phép</span></div><span className="header-spacer" /></header>
+      <main className="profile-content requests-content">
+        <div className="report-mode-tabs"><button className={tab === "CORRECTION" ? "active" : ""} onClick={() => setTab("CORRECTION")}>Điều chỉnh công</button><button className={tab === "LEAVE" ? "active" : ""} onClick={() => setTab("LEAVE")}>Nghỉ phép</button></div>
+        {error && <p className="admin-message admin-message--error" role="alert">{error}</p>}
+        {notice && <p className="admin-message admin-message--success" role="status">{notice}</p>}
+        {tab === "CORRECTION" ? <>
+          <form className="workforce-form" onSubmit={(event) => void submitCorrection(event)}>
+            <label><span>Bản ghi cần điều chỉnh</span><select value={eventId} onChange={(event) => setEventId(event.target.value)}><option value="">Chọn bản ghi</option>{events.map((item) => <option value={item.id} key={item.id}>{item.type === "CHECK_IN" ? "Vào" : "Ra"} · {item.serverTimestamp ? formatReportTime(item.serverTimestamp) : item.id} · {item.status}</option>)}</select></label>
+            <label><span>Thời gian đúng</span><input type="datetime-local" value={requestedTimestamp} onChange={(event) => setRequestedTimestamp(event.target.value)} /></label>
+            <label><span>Lý do</span><textarea value={correctionReason} onChange={(event) => setCorrectionReason(event.target.value)} maxLength={500} placeholder="Ví dụ: quên chấm công vào lúc 08:00" /></label>
+            <button className="primary-button" type="submit" disabled={submitting || loading}>{submitting ? "Đang gửi…" : "Gửi yêu cầu điều chỉnh"}</button>
+          </form>
+          <div className="report-list">{corrections.length === 0 && !loading ? <div className="device-empty"><strong>Chưa có yêu cầu điều chỉnh</strong><p>Các yêu cầu bạn gửi sẽ hiển thị tại đây.</p></div> : corrections.map((item) => <article className="report-row" key={item.id}><div><strong>{formatReportTime(item.requestedTimestamp)}</strong><small>{item.reason}</small></div><div><b className={`report-status report-status--${item.status.toLowerCase()}`}>{requestStatusLabel(item.status)}</b><small>{item.reviewNote ?? "Đang chờ người duyệt"}</small></div></article>)}</div>
+        </> : <>
+          <form className="workforce-form" onSubmit={(event) => void submitLeave(event)}>
+            <div className="workforce-form__split"><label><span>Từ ngày</span><input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} /></label><label><span>Đến ngày</span><input type="date" min={startDate} value={endDate} onChange={(event) => setEndDate(event.target.value)} /></label></div>
+            <label><span>Loại nghỉ</span><select value={leaveType} onChange={(event) => setLeaveType(event.target.value as LeaveType)}>{(["ANNUAL", "SICK", "UNPAID", "OTHER"] as LeaveType[]).map((type) => <option value={type} key={type}>{leaveTypeLabel(type)}</option>)}</select></label>
+            <label><span>Lý do</span><textarea value={leaveReason} onChange={(event) => setLeaveReason(event.target.value)} maxLength={500} placeholder="Nhập lý do và ghi chú bàn giao" /></label>
+            <button className="primary-button" type="submit" disabled={submitting || loading}>{submitting ? "Đang gửi…" : "Gửi yêu cầu nghỉ phép"}</button>
+          </form>
+          <div className="report-list">{leaves.length === 0 && !loading ? <div className="device-empty"><strong>Chưa có yêu cầu nghỉ phép</strong><p>Các yêu cầu bạn gửi sẽ hiển thị tại đây.</p></div> : leaves.map((item) => <article className="report-row" key={item.id}><div><strong>{item.startDate} → {item.endDate}</strong><small>{leaveTypeLabel(item.leaveType)} · {item.reason}</small></div><div><b className={`report-status report-status--${item.status.toLowerCase()}`}>{requestStatusLabel(item.status)}</b><small>{item.reviewNote ?? "Đang chờ người duyệt"}</small></div></article>)}</div>
+        </>}
       </main>
     </section>
   );
@@ -864,8 +963,81 @@ function ReportsAdminPanel() {
   );
 }
 
+function RequestsAdminPanel() {
+  const [tab, setTab] = useState<"CORRECTIONS" | "LEAVE" | "PAYROLL">("CORRECTIONS");
+  const [branches, setBranches] = useState<WorkforceBranch[]>([]);
+  const [branchId, setBranchId] = useState("");
+  const [corrections, setCorrections] = useState<AttendanceRequest[]>([]);
+  const [leaves, setLeaves] = useState<LeaveRequest[]>([]);
+  const [startDate, setStartDate] = useState(REPORT_WEEK_AGO);
+  const [endDate, setEndDate] = useState(REPORT_TODAY);
+  const [loading, setLoading] = useState(true);
+  const [busyId, setBusyId] = useState("");
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true); setError("");
+    try {
+      const [workforce, correctionRows, leaveRows] = await Promise.all([getAdminWorkforce(), listAttendanceRequests({ branchId: branchId || undefined }), listLeaveRequests({ branchId: branchId || undefined })]);
+      setBranches(workforce.branches); setCorrections(correctionRows); setLeaves(leaveRows);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Không thể tải yêu cầu vận hành."); }
+    finally { setLoading(false); }
+  }, [branchId]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => void load(), 0);
+    return () => window.clearTimeout(timer);
+  }, [load]);
+
+  async function reviewCorrection(item: AttendanceRequest, decision: "APPROVED" | "REJECTED") {
+    const note = window.prompt(decision === "APPROVED" ? "Ghi chú duyệt (không bắt buộc)" : "Lý do từ chối") ?? "";
+    if (decision === "REJECTED" && !note.trim()) return;
+    setBusyId(item.id); setError(""); setNotice("");
+    try { await reviewAttendanceRequest({ requestId: item.id, decision, reviewNote: note }); setNotice(`Đã ${decision === "APPROVED" ? "duyệt" : "từ chối"} yêu cầu điều chỉnh.`); await load(); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Không thể xử lý yêu cầu điều chỉnh."); }
+    finally { setBusyId(""); }
+  }
+
+  async function reviewLeave(item: LeaveRequest, decision: "APPROVED" | "REJECTED") {
+    const note = window.prompt(decision === "APPROVED" ? "Ghi chú duyệt (không bắt buộc)" : "Lý do từ chối") ?? "";
+    if (decision === "REJECTED" && !note.trim()) return;
+    setBusyId(item.id); setError(""); setNotice("");
+    try { await reviewLeaveRequest({ requestId: item.id, decision, reviewNote: note }); setNotice(`Đã ${decision === "APPROVED" ? "duyệt" : "từ chối"} yêu cầu nghỉ phép.`); await load(); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Không thể xử lý yêu cầu nghỉ phép."); }
+    finally { setBusyId(""); }
+  }
+
+  async function exportPayroll() {
+    if (endDate < startDate) { setError("Ngày kết thúc phải bằng hoặc sau ngày bắt đầu."); return; }
+    setLoading(true); setError(""); setNotice("");
+    try {
+      const result = await exportPayrollCsv({ startDate, endDate, branchId: branchId || undefined });
+      if (result.truncated) { setError("Kỳ payroll có hơn 5.000 sự kiện. Hãy thu hẹp khoảng ngày hoặc lọc chi nhánh trước khi xuất."); return; }
+      const url = URL.createObjectURL(new Blob([result.csv], { type: "text/csv;charset=utf-8" }));
+      const anchor = document.createElement("a"); anchor.href = url; anchor.download = result.filename; anchor.click(); URL.revokeObjectURL(url);
+      setNotice(`Đã xuất ${result.rowCount} sự kiện payroll.`);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Không thể xuất payroll."); }
+    finally { setLoading(false); }
+  }
+
+  return (
+    <section className="reports-panel" aria-labelledby="requests-admin-title">
+      <div className="workforce-heading"><div><small>WORKFLOW CENTER</small><h2 id="requests-admin-title">Yêu cầu & payroll</h2></div><button onClick={() => void load()} disabled={loading}>↻ Làm mới</button></div>
+      <div className="report-mode-tabs"><button className={tab === "CORRECTIONS" ? "active" : ""} onClick={() => setTab("CORRECTIONS")}>Điều chỉnh công</button><button className={tab === "LEAVE" ? "active" : ""} onClick={() => setTab("LEAVE")}>Nghỉ phép</button><button className={tab === "PAYROLL" ? "active" : ""} onClick={() => setTab("PAYROLL")}>Payroll CSV</button></div>
+      <label className="report-branch"><span>Chi nhánh</span><select value={branchId} onChange={(event) => setBranchId(event.target.value)}><option value="">Tất cả chi nhánh</option>{branches.map((branch) => <option value={branch.id} key={branch.id}>{branch.name}</option>)}</select></label>
+      {error && <p className="admin-message admin-message--error" role="alert">{error}</p>}
+      {notice && <p className="admin-message admin-message--success" role="status">{notice}</p>}
+      {tab === "PAYROLL" ? <form className="report-filters" onSubmit={(event) => { event.preventDefault(); void exportPayroll(); }}><label><span>Từ ngày</span><input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} /></label><label><span>Đến ngày</span><input type="date" min={startDate} value={endDate} onChange={(event) => setEndDate(event.target.value)} /></label><button type="submit" disabled={loading}>{loading ? "Đang xuất…" : "Xuất payroll CSV"}</button><p className="privacy-note"><span>i</span><span>Payroll chỉ dùng sự kiện chấm công và điều chỉnh đã được duyệt; Face không phải bằng chứng duy nhất.</span></p></form> : <div className="report-list">
+        {tab === "CORRECTIONS" && (corrections.length === 0 && !loading ? <div className="device-empty"><strong>Không có yêu cầu điều chỉnh</strong><p>Yêu cầu mới sẽ xuất hiện tại đây.</p></div> : corrections.map((item) => <article className="report-row" key={item.id}><div><strong>{item.employeeName} · {item.employeeCode}</strong><small>{formatReportTime(item.requestedTimestamp)} · {item.reason}</small></div><div><b className={`report-status report-status--${item.status.toLowerCase()}`}>{requestStatusLabel(item.status)}</b>{item.status === "PENDING" && <span className="device-actions"><button className="device-action device-action--approve" disabled={busyId === item.id} onClick={() => void reviewCorrection(item, "APPROVED")}>Duyệt</button><button className="device-action device-action--block" disabled={busyId === item.id} onClick={() => void reviewCorrection(item, "REJECTED")}>Từ chối</button></span>}</div></article>))}
+        {tab === "LEAVE" && (leaves.length === 0 && !loading ? <div className="device-empty"><strong>Không có yêu cầu nghỉ phép</strong><p>Yêu cầu mới sẽ xuất hiện tại đây.</p></div> : leaves.map((item) => <article className="report-row" key={item.id}><div><strong>{item.employeeName} · {item.employeeCode}</strong><small>{item.startDate} → {item.endDate} · {leaveTypeLabel(item.leaveType)}</small><small>{item.reason}</small></div><div><b className={`report-status report-status--${item.status.toLowerCase()}`}>{requestStatusLabel(item.status)}</b>{item.status === "PENDING" && <span className="device-actions"><button className="device-action device-action--approve" disabled={busyId === item.id} onClick={() => void reviewLeave(item, "APPROVED")}>Duyệt</button><button className="device-action device-action--block" disabled={busyId === item.id} onClick={() => void reviewLeave(item, "REJECTED")}>Từ chối</button></span>}</div></article>))}
+      </div>}
+    </section>
+  );
+}
+
 function DeviceAdminScreen({ user, onBack }: { user: AttendanceUser; onBack: () => void }) {
-  const [section, setSection] = useState<"DEVICES" | "PRESENCE" | "EMPLOYEES" | "SHIFTS" | "PILOT" | "REPORTS">("DEVICES");
+  const [section, setSection] = useState<"DEVICES" | "PRESENCE" | "EMPLOYEES" | "SHIFTS" | "PILOT" | "REPORTS" | "REQUESTS">("DEVICES");
   const [devices, setDevices] = useState<AdminDevice[]>([]);
   const [filter, setFilter] = useState<"ALL" | DeviceStatus>("ALL");
   const [loading, setLoading] = useState(true);
@@ -929,7 +1101,7 @@ function DeviceAdminScreen({ user, onBack }: { user: AttendanceUser; onBack: () 
         <button className="back-button" onClick={onBack} aria-label="Quay lại">←</button>
         <div>
           <span>TRUNG TÂM QUẢN TRỊ</span>
-          <h1 id="device-admin-title">{section === "DEVICES" ? "Kiểm soát truy cập" : section === "PRESENCE" ? "Hiện diện tại cơ sở" : section === "EMPLOYEES" ? "Đội ngũ nhân viên" : section === "SHIFTS" ? "Ca làm & phân công" : section === "PILOT" ? "Điều hành pilot" : "Báo cáo & realtime"}</h1>
+          <h1 id="device-admin-title">{section === "DEVICES" ? "Kiểm soát truy cập" : section === "PRESENCE" ? "Hiện diện tại cơ sở" : section === "EMPLOYEES" ? "Đội ngũ nhân viên" : section === "SHIFTS" ? "Ca làm & phân công" : section === "PILOT" ? "Điều hành pilot" : section === "REPORTS" ? "Báo cáo & realtime" : "Yêu cầu & payroll"}</h1>
         </div>
         <button className="admin-refresh" onClick={() => section === "DEVICES" && void refresh()} disabled={section !== "DEVICES" || loading} aria-label="Tải lại danh sách">↻</button>
       </header>
@@ -948,9 +1120,10 @@ function DeviceAdminScreen({ user, onBack }: { user: AttendanceUser; onBack: () 
           <button className={section === "SHIFTS" ? "active" : ""} onClick={() => setSection("SHIFTS")}>◷ Phân ca</button>
           <button className={section === "PILOT" ? "active" : ""} onClick={() => setSection("PILOT")}>⌁ Pilot</button>
           <button className={section === "REPORTS" ? "active" : ""} onClick={() => setSection("REPORTS")}>▤ Báo cáo</button>
+          <button className={section === "REQUESTS" ? "active" : ""} onClick={() => setSection("REQUESTS")}>✓ Yêu cầu</button>
         </nav>
 
-        {section === "PRESENCE" ? <PresenceAdminPanel /> : section === "EMPLOYEES" || section === "SHIFTS" ? <WorkforceAdminPanel mode={section} /> : section === "PILOT" ? <PilotAdminPanel canEdit={user.role === "SUPER_ADMIN" || user.role === "COMPANY_ADMIN"} /> : section === "REPORTS" ? <ReportsAdminPanel /> : <><div className="device-stats">
+        {section === "PRESENCE" ? <PresenceAdminPanel /> : section === "EMPLOYEES" || section === "SHIFTS" ? <WorkforceAdminPanel mode={section} /> : section === "PILOT" ? <PilotAdminPanel canEdit={user.role === "SUPER_ADMIN" || user.role === "COMPANY_ADMIN"} /> : section === "REPORTS" ? <ReportsAdminPanel /> : section === "REQUESTS" ? <RequestsAdminPanel /> : <><div className="device-stats">
           <button className={filter === "PENDING" ? "active" : ""} onClick={() => setFilter("PENDING")}><strong>{counts.PENDING}</strong><span>Chờ duyệt</span></button>
           <button className={filter === "TRUSTED" ? "active" : ""} onClick={() => setFilter("TRUSTED")}><strong>{counts.TRUSTED}</strong><span>Đã duyệt</span></button>
           <button className={filter === "BLOCKED" ? "active" : ""} onClick={() => setFilter("BLOCKED")}><strong>{counts.BLOCKED}</strong><span>Đã khóa</span></button>
@@ -1565,6 +1738,11 @@ export function AttendancePrototype() {
   const [checkInResult, setCheckInResult] = useState<CheckInResult | null>(null);
 
   useEffect(() => {
+    if (demoMode || !("serviceWorker" in navigator)) return;
+    void navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(() => undefined);
+  }, [demoMode]);
+
+  useEffect(() => {
     const update = () => {
       const now = new Date();
       setTime(new Intl.DateTimeFormat("vi-VN", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Ho_Chi_Minh" }).format(now));
@@ -1660,8 +1838,9 @@ export function AttendancePrototype() {
           <div className="device-status"><span>{time}</span><span className="device-island" /><span>▮ ◒</span></div>
           {screen === "login" && <LoginScreen onLogin={handleLogin} />}
           {screen === "password" && user && <ChangeTemporaryPasswordScreen user={user} onChanged={(updatedUser) => { setUser(updatedUser); setScreen("home"); }} onLogout={() => void handleLogout()} />}
-          {screen === "home" && user && <HomeScreen time={time} date={date} user={user} precheck={precheck} onCheckIn={() => setScreen("precheck")} onManageDevices={() => setScreen("devices")} onProfile={() => setScreen("profile")} />}
+          {screen === "home" && user && <HomeScreen time={time} date={date} user={user} precheck={precheck} onCheckIn={() => setScreen("precheck")} onManageDevices={() => setScreen("devices")} onProfile={() => setScreen("profile")} onRequests={() => setScreen("requests")} />}
           {screen === "profile" && user && <ProfileScreen user={user} onBack={() => setScreen("home")} onLogout={() => void handleLogout()} onWithdrawn={() => { setUser((current) => current ? { ...current, faceEnrollmentStatus: "NOT_STARTED" } : current); setPrecheck((current) => current ? { ...current, employee: { ...current.employee, faceEnrollmentStatus: "NOT_STARTED" } } : current); }} />}
+          {screen === "requests" && user && <RequestsScreen onBack={() => setScreen("home")} />}
           {screen === "devices" && user?.canManageDevices && <DeviceAdminScreen user={user} onBack={() => setScreen("home")} />}
           {screen === "precheck" && <PrecheckScreen onBack={() => setScreen("home")} onContinue={(data, currentLocation, useFace) => { setPrecheck(data); setLocation(currentLocation); setFaceProofId(""); setFaceStepSelected(useFace); setScreen(useFace ? "face" : "presence"); }} />}
           {screen === "face" && precheck && <FaceScreen precheck={precheck} onBack={() => { setFaceProofId(""); setScreen("precheck"); }} onComplete={async (proofId) => { setFaceProofId(proofId); setScreen("presence"); }} />}

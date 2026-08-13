@@ -125,11 +125,18 @@ service cloud.firestore {
 
     match /attendanceRequests/{requestId} {
       allow read: if ownsRecord(resource.data) || (isManager() && belongsToCompany(resource.data));
-      allow create: if isActiveEmployee()
-        && request.resource.data.userId == request.auth.uid
-        && request.resource.data.companyId == companyId()
-        && request.resource.data.status == 'PENDING';
-      allow update, delete: if false;
+      // Callable Functions own creation and transitions so event/tenant/
+      // branch checks and the audit trail cannot be bypassed.
+      allow create, update, delete: if false;
+    }
+
+    match /attendanceAdjustments/{adjustmentId} {
+      allow read, write: if false;
+    }
+
+    match /leaveRequests/{requestId} {
+      allow read: if ownsRecord(resource.data) || (isManager() && belongsToCompany(resource.data));
+      allow create, update, delete: if false;
     }
 
     match /{document=**} {

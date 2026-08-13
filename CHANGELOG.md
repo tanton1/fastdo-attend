@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — Operations workflow
+
+- Thêm yêu cầu điều chỉnh công có trạng thái `PENDING/APPROVED/REJECTED/CANCELLED`, audit và adjustment bất biến cho payroll.
+- Thêm yêu cầu nghỉ phép, phân quyền duyệt theo tenant/chi nhánh và giao diện xử lý cho nhân viên/quản trị.
+- Thêm callable `getMyAttendanceEvents`, `create/list/reviewAttendanceRequest`, `create/list/reviewLeaveRequest` và `exportPayrollCsv`.
+- Thêm payroll CSV theo kỳ/chi nhánh, chống CSV formula injection và chặn kỳ vượt 5.000 sự kiện.
+- Thêm service worker offline shell; thao tác chấm công vẫn cần server xác nhận.
+- Mở rộng Firestore Rules/indexes và runbook go-live.
+
 ## Phase 9 — Report pagination (2026-08-13)
 
 - Attendance report có cursor opaque theo `serverTimestamp` + document ID, giữ nguyên tenant/branch scope và giới hạn tối đa 500 dòng mỗi trang.

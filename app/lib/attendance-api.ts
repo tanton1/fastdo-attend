@@ -1,7 +1,7 @@
 import { browserLocalPersistence, browserSessionPersistence, sendPasswordResetEmail, setPersistence, signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { httpsCallable } from "firebase/functions";
 import { firebaseDemoMode, getFirebaseServices } from "./firebase-client";
-import type { AdminDevice, AdminWorkforce, AttendanceReport, AttendanceUser, CheckInResult, CheckOutResult, CreateEmployeeInput, CreateEmployeeResult, DeviceLocation, DeviceReviewResult, DeviceStatus, EmployeeRole, FaceChallenge, FaceCompletion, FaceConsentWithdrawal, FaceEvidence, FacePurpose, FaceSession, LocationHeartbeatResult, PilotPolicy, PilotPolicyUpdate, PrecheckData, PresenceChallenge, PresenceProof, RealtimeMonitor, WorkforceAssignment, WorkforceEmployee } from "./attendance-types";
+import type { AdminDevice, AdminWorkforce, AttendanceReport, AttendanceRequest, AttendanceSelfEvent, AttendanceUser, CheckInResult, CheckOutResult, CreateEmployeeInput, CreateEmployeeResult, DeviceLocation, DeviceReviewResult, DeviceStatus, EmployeeRole, FaceChallenge, FaceCompletion, FaceConsentWithdrawal, FaceEvidence, FacePurpose, FaceSession, LeaveRequest, LeaveType, LocationHeartbeatResult, PayrollExport, PilotPolicy, PilotPolicyUpdate, PrecheckData, PresenceChallenge, PresenceProof, RealtimeMonitor, WorkforceAssignment, WorkforceEmployee } from "./attendance-types";
 
 const demoUser: AttendanceUser = {
   uid: "demo_hai_au",
@@ -484,6 +484,101 @@ export async function getAttendanceReport(input: { startDate: string; endDate: s
   } catch (reason) {
     throw new Error(firebaseErrorMessage(reason, "Không thể tải báo cáo chấm công."));
   }
+}
+
+export async function createAttendanceRequest(input: { eventId: string; requestedTimestamp: string; reason: string }): Promise<AttendanceRequest> {
+  if (firebaseDemoMode()) {
+    await wait(350);
+    return {
+      id: `demo_request_${crypto.randomUUID()}`,
+      eventId: input.eventId,
+      userId: demoUser.uid,
+      employeeName: demoUser.fullName,
+      employeeCode: demoUser.employeeCode,
+      branchId: demoPrecheck.branch.id,
+      branchName: demoPrecheck.branch.name,
+      requestedTimestamp: input.requestedTimestamp,
+      reason: input.reason,
+      status: "PENDING",
+      createdAt: new Date().toISOString(),
+      reviewedAt: null,
+      reviewedBy: null,
+      reviewNote: null,
+    };
+  }
+  const callable = httpsCallable<typeof input, { request: AttendanceRequest }>(getFirebaseServices().functions, "createAttendanceRequest");
+  try { return (await callable(input)).data.request; }
+  catch (reason) { throw new Error(firebaseErrorMessage(reason, "Không thể tạo yêu cầu điều chỉnh công.")); }
+}
+
+export async function getMyAttendanceEvents(limit = 50): Promise<AttendanceSelfEvent[]> {
+  if (firebaseDemoMode()) {
+    await wait(250);
+    return [{ id: "demo_report_1", type: "CHECK_IN", status: "VALID", serverTimestamp: new Date(Date.now() - 3600000).toISOString(), branchId: demoPrecheck.branch.id }];
+  }
+  const callable = httpsCallable<{ limit: number }, { events: AttendanceSelfEvent[] }>(getFirebaseServices().functions, "getMyAttendanceEvents");
+  try { return (await callable({ limit })).data.events; }
+  catch (reason) { throw new Error(firebaseErrorMessage(reason, "Không thể tải lịch sử chấm công.")); }
+}
+
+export async function listAttendanceRequests(input: { branchId?: string; status?: AttendanceRequest["status"]; limit?: number } = {}): Promise<AttendanceRequest[]> {
+  if (firebaseDemoMode()) {
+    await wait(250);
+    return [];
+  }
+  const callable = httpsCallable<typeof input, { requests: AttendanceRequest[] }>(getFirebaseServices().functions, "listAttendanceRequests");
+  try { return (await callable(input)).data.requests; }
+  catch (reason) { throw new Error(firebaseErrorMessage(reason, "Không thể tải yêu cầu điều chỉnh công.")); }
+}
+
+export async function reviewAttendanceRequest(input: { requestId: string; decision: "APPROVED" | "REJECTED"; reviewNote?: string }): Promise<AttendanceRequest> {
+  if (firebaseDemoMode()) {
+    await wait(250);
+    return { id: input.requestId, eventId: "demo_event", userId: demoUser.uid, employeeName: demoUser.fullName, employeeCode: demoUser.employeeCode, branchId: demoPrecheck.branch.id, branchName: demoPrecheck.branch.name, requestedTimestamp: new Date().toISOString(), reason: "Demo", status: input.decision, createdAt: new Date().toISOString(), reviewedAt: new Date().toISOString(), reviewedBy: demoUser.uid, reviewNote: input.reviewNote ?? null };
+  }
+  const callable = httpsCallable<typeof input, { request: AttendanceRequest }>(getFirebaseServices().functions, "reviewAttendanceRequest");
+  try { return (await callable(input)).data.request; }
+  catch (reason) { throw new Error(firebaseErrorMessage(reason, "Không thể xử lý yêu cầu điều chỉnh công.")); }
+}
+
+export async function createLeaveRequest(input: { startDate: string; endDate: string; leaveType: LeaveType; reason: string }): Promise<LeaveRequest> {
+  if (firebaseDemoMode()) {
+    await wait(300);
+    return { id: `demo_leave_${crypto.randomUUID()}`, userId: demoUser.uid, employeeName: demoUser.fullName, employeeCode: demoUser.employeeCode, branchId: demoPrecheck.branch.id, branchName: demoPrecheck.branch.name, ...input, status: "PENDING", createdAt: new Date().toISOString(), reviewedAt: null, reviewedBy: null, reviewNote: null };
+  }
+  const callable = httpsCallable<typeof input, { request: LeaveRequest }>(getFirebaseServices().functions, "createLeaveRequest");
+  try { return (await callable(input)).data.request; }
+  catch (reason) { throw new Error(firebaseErrorMessage(reason, "Không thể tạo yêu cầu nghỉ phép.")); }
+}
+
+export async function listLeaveRequests(input: { branchId?: string; status?: LeaveRequest["status"]; limit?: number } = {}): Promise<LeaveRequest[]> {
+  if (firebaseDemoMode()) {
+    await wait(250);
+    return [];
+  }
+  const callable = httpsCallable<typeof input, { requests: LeaveRequest[] }>(getFirebaseServices().functions, "listLeaveRequests");
+  try { return (await callable(input)).data.requests; }
+  catch (reason) { throw new Error(firebaseErrorMessage(reason, "Không thể tải yêu cầu nghỉ phép.")); }
+}
+
+export async function reviewLeaveRequest(input: { requestId: string; decision: "APPROVED" | "REJECTED"; reviewNote?: string }): Promise<LeaveRequest> {
+  if (firebaseDemoMode()) {
+    await wait(250);
+    return { id: input.requestId, userId: demoUser.uid, employeeName: demoUser.fullName, employeeCode: demoUser.employeeCode, branchId: demoPrecheck.branch.id, branchName: demoPrecheck.branch.name, startDate: new Date().toISOString().slice(0, 10), endDate: new Date().toISOString().slice(0, 10), leaveType: "ANNUAL", reason: "Demo", status: input.decision, createdAt: new Date().toISOString(), reviewedAt: new Date().toISOString(), reviewedBy: demoUser.uid, reviewNote: input.reviewNote ?? null };
+  }
+  const callable = httpsCallable<typeof input, { request: LeaveRequest }>(getFirebaseServices().functions, "reviewLeaveRequest");
+  try { return (await callable(input)).data.request; }
+  catch (reason) { throw new Error(firebaseErrorMessage(reason, "Không thể xử lý yêu cầu nghỉ phép.")); }
+}
+
+export async function exportPayrollCsv(input: { startDate: string; endDate: string; branchId?: string }): Promise<PayrollExport> {
+  if (firebaseDemoMode()) {
+    await wait(300);
+    return { filename: `fastdo-payroll-${input.startDate}-${input.endDate}.csv`, csv: "\\uFEFFemployee_code,employee_name,type,status\\r\\nFD0238,Hải Âu,CHECK_IN,VALID\\r\\n", rowCount: 1, truncated: false };
+  }
+  const callable = httpsCallable<typeof input, PayrollExport & { timezone: string }>(getFirebaseServices().functions, "exportPayrollCsv");
+  try { return (await callable(input)).data; }
+  catch (reason) { throw new Error(firebaseErrorMessage(reason, "Không thể xuất dữ liệu payroll.")); }
 }
 
 export async function getRealtimeMonitor(input: { branchId?: string; limit?: number } = {}): Promise<RealtimeMonitor> {

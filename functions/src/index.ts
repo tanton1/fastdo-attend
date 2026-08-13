@@ -32,6 +32,8 @@ import {
 import { createPresenceNonce, hashPresenceQr, isSixDigitPresenceCode, signPresenceQr, verifyPresenceQr } from "./domain/presence";
 import type {
   BranchDocument,
+  AttendanceRequestDocument,
+  AttendanceRequestStatus,
   DeviceDocument,
   DeviceStatus,
   EmployeeDocument,
@@ -40,6 +42,9 @@ import type {
   FaceProofDocument,
   FacePurpose,
   FaceSessionDocument,
+  LeaveRequestDocument,
+  LeaveRequestStatus,
+  LeaveType,
   PilotPolicyDocument,
   PresenceChallengeDocument,
   PresenceProofDocument,
@@ -170,6 +175,53 @@ interface RealtimeMonitorInput {
   limit?: number;
 }
 
+interface CreateAttendanceRequestInput {
+  eventId: string;
+  requestedTimestamp: string;
+  reason: string;
+}
+
+interface ListAttendanceRequestsInput {
+  branchId?: string;
+  status?: AttendanceRequestStatus;
+  limit?: number;
+}
+
+interface ReviewAttendanceRequestInput {
+  requestId: string;
+  decision: Extract<AttendanceRequestStatus, "APPROVED" | "REJECTED">;
+  reviewNote?: string;
+}
+
+interface CreateLeaveRequestInput {
+  startDate: string;
+  endDate: string;
+  leaveType: LeaveType;
+  reason: string;
+}
+
+interface ListLeaveRequestsInput {
+  branchId?: string;
+  status?: LeaveRequestStatus;
+  limit?: number;
+}
+
+interface ReviewLeaveRequestInput {
+  requestId: string;
+  decision: Extract<LeaveRequestStatus, "APPROVED" | "REJECTED">;
+  reviewNote?: string;
+}
+
+interface PayrollExportInput {
+  startDate: string;
+  endDate: string;
+  branchId?: string;
+}
+
+interface MyAttendanceEventsInput {
+  limit?: number;
+}
+
 function presenceSigningSecret(): string {
   const secret = process.env.PRESENCE_SIGNING_KEY;
   if (!secret || secret.length < 32) throw new HttpsError("internal", "Khóa ký QR hiện diện chưa được cấu hình.");
@@ -231,6 +283,88 @@ function sanitizeOptionalBranchId(value: unknown): string | null {
     throw new HttpsError("invalid-argument", "Chi nhánh không hợp lệ.");
   }
   return value.trim();
+}
+
+function requireDocumentId(value: unknown, label: string): string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{8,160}$/.test(value.trim())) {
+    throw new HttpsError("invalid-argument", `${label} không hợp lệ.`);
+  }
+  return value.trim();
+}
+
+function requireShortReason(value: unknown, label: string, maxLength = 500): string {
+  if (typeof value !== "string") throw new HttpsError("invalid-argument", `${label} là bắt buộc.`);
+  const reason = value.trim();
+  if (reason.length < 3 || reason.length > maxLength) {
+    throw new HttpsError("invalid-argument", `${label} phải dài từ 3 đến ${maxLength} ký tự.`);
+  }
+  return reason;
+}
+
+function requireIsoTimestamp(value: unknown): Timestamp {
+  if (typeof value !== "string") throw new HttpsError("invalid-argument", "Thời gian điều chỉnh không hợp lệ.");
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime()) || date.getTime() < Date.now() - 366 * 24 * 60 * 60 * 1000 || date.getTime() > Date.now() + 366 * 24 * 60 * 60 * 1000) {
+    throw new HttpsError("invalid-argument", "Thời gian điều chỉnh phải nằm trong khoảng cho phép.");
+  }
+  return Timestamp.fromDate(date);
+}
+
+function requireLeaveType(value: unknown): LeaveType {
+  if (value !== "ANNUAL" && value !== "SICK" && value !== "UNPAID" && value !== "OTHER") {
+    throw new HttpsError("invalid-argument", "Loại nghỉ phép không hợp lệ.");
+  }
+  return value;
+}
+
+function requireDateRange(startDate: unknown, endDate: unknown): { startDate: string; endDate: string } {
+  if (!isIsoDateOnly(startDate) || !isIsoDateOnly(endDate)) {
+    throw new HttpsError("invalid-argument", "Khoảng ngày không hợp lệ.");
+  }
+  if (endDate < startDate) throw new HttpsError("invalid-argument", "Ngày kết thúc phải sau ngày bắt đầu.");
+  const start = Date.parse(`${startDate}T00:00:00.000Z`);
+  const end = Date.parse(`${endDate}T23:59:59.999Z`);
+  if (end - start > 366 * 24 * 60 * 60 * 1000) throw new HttpsError("invalid-argument", "Khoảng ngày không được dài quá 366 ngày.");
+  return { startDate, endDate };
+}
+
+function publicAttendanceRequest(id: string, data: AttendanceRequestDocument, employee?: EmployeeDocument, branch?: BranchDocument) {
+  return {
+    id,
+    eventId: data.eventId,
+    userId: data.userId,
+    employeeName: employee?.fullName ?? "Nhân viên",
+    employeeCode: employee?.employeeCode ?? "—",
+    branchId: data.branchId,
+    branchName: branch?.name ?? "Chi nhánh",
+    requestedTimestamp: data.requestedTimestamp.toDate().toISOString(),
+    reason: data.reason,
+    status: data.status,
+    createdAt: data.createdAt.toDate().toISOString(),
+    reviewedAt: data.reviewedAt?.toDate().toISOString() ?? null,
+    reviewedBy: data.reviewedBy,
+    reviewNote: data.reviewNote,
+  };
+}
+
+function publicLeaveRequest(id: string, data: LeaveRequestDocument, employee?: EmployeeDocument, branch?: BranchDocument) {
+  return {
+    id,
+    userId: data.userId,
+    employeeName: employee?.fullName ?? "Nhân viên",
+    employeeCode: employee?.employeeCode ?? "—",
+    branchId: data.branchId,
+    branchName: branch?.name ?? "Chi nhánh",
+    startDate: data.startDate,
+    endDate: data.endDate,
+    leaveType: data.leaveType,
+    reason: data.reason,
+    status: data.status,
+    createdAt: data.createdAt.toDate().toISOString(),
+    reviewedAt: data.reviewedAt?.toDate().toISOString() ?? null,
+    reviewedBy: data.reviewedBy,
+    reviewNote: data.reviewNote,
+  };
 }
 
 async function assertBranchAccess(context: EmployeeContext, branchId: string, tenantWide = false): Promise<BranchDocument> {
@@ -691,6 +825,336 @@ export const getAttendanceReport = onCall<AttendanceReportInput>(callableOptions
     hasMore: truncated,
     pagination: { limit, returned: rows.length, hasMore: truncated, nextCursor },
   };
+});
+
+export const createAttendanceRequest = onCall<CreateAttendanceRequestInput>(callableOptions, async (request) => {
+  const userId = requireUserId(request);
+  const context = await loadEmployeeContext(userId);
+  await enforceRateLimit(userId, "createAttendanceRequest", 10, 300);
+  const eventId = requireDocumentId(request.data?.eventId, "Mã sự kiện");
+  const requestedTimestamp = requireIsoTimestamp(request.data?.requestedTimestamp);
+  const reason = requireShortReason(request.data?.reason, "Lý do điều chỉnh");
+  const db = getFirestore();
+  const eventSnapshot = await db.doc(`attendanceEvents/${eventId}`).get();
+  if (!eventSnapshot.exists) throw new HttpsError("not-found", "Không tìm thấy sự kiện chấm công.");
+  const event = eventSnapshot.data();
+  if (event?.companyId !== context.employee.companyId || event.userId !== userId) {
+    throw new HttpsError("permission-denied", "Bạn chỉ được yêu cầu điều chỉnh bản ghi của mình.");
+  }
+  if (event.type !== "CHECK_IN" && event.type !== "CHECK_OUT") {
+    throw new HttpsError("failed-precondition", "Loại sự kiện này không hỗ trợ điều chỉnh.");
+  }
+  const existing = await db.collection("attendanceRequests")
+    .where("companyId", "==", context.employee.companyId)
+    .where("userId", "==", userId)
+    .limit(200)
+    .get();
+  if (existing.docs.some((snapshot) => snapshot.data().eventId === eventId && snapshot.data().status === "PENDING")) {
+    throw new HttpsError("already-exists", "Sự kiện này đang có yêu cầu chờ duyệt.");
+  }
+  const branchId = String(event.branchId ?? "");
+  if (!branchId || !context.employee.branchIds?.includes(branchId)) {
+    throw new HttpsError("permission-denied", "Sự kiện không thuộc chi nhánh được gán cho bạn.");
+  }
+  const now = Timestamp.now();
+  const reference = db.collection("attendanceRequests").doc();
+  const data: AttendanceRequestDocument = {
+    companyId: context.employee.companyId,
+    userId,
+    branchId,
+    eventId,
+    requestedTimestamp,
+    reason,
+    status: "PENDING",
+    createdAt: now,
+    reviewedAt: null,
+    reviewedBy: null,
+    reviewNote: null,
+  };
+  await db.runTransaction(async (transaction) => {
+    transaction.create(reference, data);
+    transaction.create(db.collection("auditLogs").doc(), buildAuditLogDocument(request, context, {
+      action: "ATTENDANCE_CORRECTION_REQUESTED",
+      targetType: "ATTENDANCE_REQUEST",
+      targetId: reference.id,
+      metadata: { eventId, branchId, eventType: String(event.type ?? "UNKNOWN") },
+    }));
+  });
+  const branchSnapshot = await db.doc(`branches/${branchId}`).get();
+  return { request: publicAttendanceRequest(reference.id, data, context.employee, branchSnapshot.exists ? branchSnapshot.data() as BranchDocument : undefined) };
+});
+
+export const getMyAttendanceEvents = onCall<MyAttendanceEventsInput>(callableOptions, async (request) => {
+  const userId = requireUserId(request);
+  const context = await loadEmployeeContext(userId);
+  await enforceRateLimit(userId, "getMyAttendanceEvents", 30);
+  const limit = Number.isInteger(request.data?.limit) ? Math.max(1, Math.min(Number(request.data.limit), 100)) : 50;
+  const snapshot = await getFirestore().collection("attendanceEvents").where("userId", "==", userId).limit(200).get();
+  return {
+    events: snapshot.docs
+      .filter((item) => item.data().companyId === context.employee.companyId)
+      .sort((left, right) => Number(right.data().serverTimestamp?.toMillis?.() ?? 0) - Number(left.data().serverTimestamp?.toMillis?.() ?? 0))
+      .slice(0, limit)
+      .map((item) => ({
+        id: item.id,
+        type: item.data().type === "CHECK_OUT" ? "CHECK_OUT" : "CHECK_IN",
+        status: typeof item.data().status === "string" ? item.data().status : "UNKNOWN",
+        serverTimestamp: timestampToIso(item.data().serverTimestamp),
+        branchId: String(item.data().branchId ?? ""),
+      })),
+  };
+});
+
+export const listAttendanceRequests = onCall<ListAttendanceRequestsInput>(callableOptions, async (request) => {
+  const userId = requireUserId(request);
+  const context = await loadEmployeeContext(userId);
+  await enforceRateLimit(userId, "listAttendanceRequests", 30);
+  const branchId = sanitizeOptionalBranchId(request.data?.branchId);
+  const status = request.data?.status;
+  if (status && !["PENDING", "APPROVED", "REJECTED", "CANCELLED"].includes(status)) {
+    throw new HttpsError("invalid-argument", "Trạng thái yêu cầu không hợp lệ.");
+  }
+  const manager = MANAGER_ROLES.includes(context.employee.role);
+  if (branchId && !manager) throw new HttpsError("permission-denied", "Nhân viên không được lọc yêu cầu theo chi nhánh.");
+  if (branchId && manager) await assertBranchAccess(context, branchId);
+  const limit = Number.isInteger(request.data?.limit) ? Math.max(1, Math.min(Number(request.data.limit), 200)) : 100;
+  const db = getFirestore();
+  const snapshot = await db.collection("attendanceRequests")
+    .where("companyId", "==", context.employee.companyId)
+    .limit(500)
+    .get();
+  const selected = snapshot.docs
+    .map((document) => ({ id: document.id, data: document.data() as AttendanceRequestDocument }))
+    .filter(({ data }) => (manager ? true : data.userId === userId))
+    .filter(({ data }) => !branchId || data.branchId === branchId)
+    .filter(({ data }) => !status || data.status === status)
+    .sort((left, right) => right.data.createdAt.toMillis() - left.data.createdAt.toMillis())
+    .slice(0, limit);
+  const employeeIds = [...new Set(selected.map(({ data }) => data.userId))];
+  const branchIds = [...new Set(selected.map(({ data }) => data.branchId))];
+  const [employeeSnapshots, branchSnapshots] = await Promise.all([
+    employeeIds.length ? db.getAll(...employeeIds.map((id) => db.doc(`employees/${id}`))) : [],
+    branchIds.length ? db.getAll(...branchIds.map((id) => db.doc(`branches/${id}`))) : [],
+  ]);
+  const employees = new Map(employeeSnapshots.filter((item) => item.exists).map((item) => [item.id, item.data() as EmployeeDocument]));
+  const branches = new Map(branchSnapshots.filter((item) => item.exists).map((item) => [item.id, item.data() as BranchDocument]));
+  return { requests: selected.map(({ id, data }) => publicAttendanceRequest(id, data, employees.get(data.userId), branches.get(data.branchId))) };
+});
+
+export const reviewAttendanceRequest = onCall<ReviewAttendanceRequestInput>(callableOptions, async (request) => {
+  const actorId = requireUserId(request);
+  const context = await loadManagerContext(actorId);
+  await enforceRateLimit(actorId, "reviewAttendanceRequest", 30, 300);
+  const requestId = requireDocumentId(request.data?.requestId, "Mã yêu cầu");
+  const decision = request.data?.decision;
+  if (decision !== "APPROVED" && decision !== "REJECTED") throw new HttpsError("invalid-argument", "Quyết định duyệt không hợp lệ.");
+  const reviewNote = typeof request.data?.reviewNote === "string" ? request.data.reviewNote.trim().slice(0, 500) : "";
+  const db = getFirestore();
+  const reference = db.doc(`attendanceRequests/${requestId}`);
+  const now = Timestamp.now();
+  const updated = await db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(reference);
+    if (!snapshot.exists) throw new HttpsError("not-found", "Không tìm thấy yêu cầu điều chỉnh.");
+    const data = snapshot.data() as AttendanceRequestDocument;
+    if (data.companyId !== context.employee.companyId) throw new HttpsError("permission-denied", "Yêu cầu không thuộc doanh nghiệp.");
+    await assertBranchAccess(context, data.branchId);
+    if (data.status !== "PENDING") throw new HttpsError("failed-precondition", "Yêu cầu đã được xử lý trước đó.");
+    const next: AttendanceRequestDocument = { ...data, status: decision, reviewedAt: now, reviewedBy: actorId, reviewNote: reviewNote || null };
+    transaction.update(reference, { status: decision, reviewedAt: now, reviewedBy: actorId, reviewNote: reviewNote || null });
+    if (decision === "APPROVED") {
+      transaction.create(db.collection("attendanceAdjustments").doc(), {
+        companyId: data.companyId,
+        requestId,
+        eventId: data.eventId,
+        userId: data.userId,
+        branchId: data.branchId,
+        effectiveTimestamp: data.requestedTimestamp,
+        approvedAt: now,
+        approvedBy: actorId,
+        reason: data.reason,
+      });
+    }
+    transaction.create(db.collection("auditLogs").doc(), buildAuditLogDocument(request, context, {
+      action: decision === "APPROVED" ? "ATTENDANCE_CORRECTION_APPROVED" : "ATTENDANCE_CORRECTION_REJECTED",
+      targetType: "ATTENDANCE_REQUEST",
+      targetId: requestId,
+      metadata: { eventId: data.eventId, userId: data.userId, branchId: data.branchId },
+    }));
+    return next;
+  });
+  const employeeSnapshot = await db.doc(`employees/${updated.userId}`).get();
+  const branchSnapshot = await db.doc(`branches/${updated.branchId}`).get();
+  return { request: publicAttendanceRequest(requestId, updated, employeeSnapshot.exists ? employeeSnapshot.data() as EmployeeDocument : undefined, branchSnapshot.exists ? branchSnapshot.data() as BranchDocument : undefined) };
+});
+
+export const createLeaveRequest = onCall<CreateLeaveRequestInput>(callableOptions, async (request) => {
+  const userId = requireUserId(request);
+  const context = await loadEmployeeContext(userId);
+  await enforceRateLimit(userId, "createLeaveRequest", 10, 300);
+  const dates = requireDateRange(request.data?.startDate, request.data?.endDate);
+  const leaveType = requireLeaveType(request.data?.leaveType);
+  const reason = requireShortReason(request.data?.reason, "Lý do nghỉ phép");
+  const branchId = context.employee.branchIds?.[0];
+  if (!branchId) throw new HttpsError("failed-precondition", "Bạn chưa được gán chi nhánh.");
+  const db = getFirestore();
+  const existing = await db.collection("leaveRequests").where("companyId", "==", context.employee.companyId).where("userId", "==", userId).limit(200).get();
+  const overlaps = existing.docs.some((snapshot) => {
+    const data = snapshot.data() as LeaveRequestDocument;
+    return data.status !== "REJECTED" && data.status !== "CANCELLED" && data.startDate <= dates.endDate && data.endDate >= dates.startDate;
+  });
+  if (overlaps) throw new HttpsError("already-exists", "Khoảng ngày này đã có yêu cầu nghỉ phép.");
+  const now = Timestamp.now();
+  const reference = db.collection("leaveRequests").doc();
+  const data: LeaveRequestDocument = {
+    companyId: context.employee.companyId,
+    userId,
+    branchId,
+    startDate: dates.startDate,
+    endDate: dates.endDate,
+    leaveType,
+    reason,
+    status: "PENDING",
+    createdAt: now,
+    reviewedAt: null,
+    reviewedBy: null,
+    reviewNote: null,
+  };
+  await db.runTransaction(async (transaction) => {
+    transaction.create(reference, data);
+    transaction.create(db.collection("auditLogs").doc(), buildAuditLogDocument(request, context, {
+      action: "LEAVE_REQUESTED",
+      targetType: "LEAVE_REQUEST",
+      targetId: reference.id,
+      metadata: { branchId, leaveType, startDate: dates.startDate, endDate: dates.endDate },
+    }));
+  });
+  const branchSnapshot = await db.doc(`branches/${branchId}`).get();
+  return { request: publicLeaveRequest(reference.id, data, context.employee, branchSnapshot.exists ? branchSnapshot.data() as BranchDocument : undefined) };
+});
+
+export const listLeaveRequests = onCall<ListLeaveRequestsInput>(callableOptions, async (request) => {
+  const userId = requireUserId(request);
+  const context = await loadEmployeeContext(userId);
+  await enforceRateLimit(userId, "listLeaveRequests", 30);
+  const branchId = sanitizeOptionalBranchId(request.data?.branchId);
+  const status = request.data?.status;
+  if (status && !["PENDING", "APPROVED", "REJECTED", "CANCELLED"].includes(status)) throw new HttpsError("invalid-argument", "Trạng thái nghỉ phép không hợp lệ.");
+  const manager = MANAGER_ROLES.includes(context.employee.role);
+  if (branchId && !manager) throw new HttpsError("permission-denied", "Nhân viên không được lọc yêu cầu theo chi nhánh.");
+  if (branchId && manager) await assertBranchAccess(context, branchId);
+  const limit = Number.isInteger(request.data?.limit) ? Math.max(1, Math.min(Number(request.data.limit), 200)) : 100;
+  const db = getFirestore();
+  const snapshot = await db.collection("leaveRequests").where("companyId", "==", context.employee.companyId).limit(500).get();
+  const selected = snapshot.docs
+    .map((document) => ({ id: document.id, data: document.data() as LeaveRequestDocument }))
+    .filter(({ data }) => (manager ? true : data.userId === userId))
+    .filter(({ data }) => !branchId || data.branchId === branchId)
+    .filter(({ data }) => !status || data.status === status)
+    .sort((left, right) => right.data.createdAt.toMillis() - left.data.createdAt.toMillis())
+    .slice(0, limit);
+  const employeeIds = [...new Set(selected.map(({ data }) => data.userId))];
+  const branchIds = [...new Set(selected.map(({ data }) => data.branchId))];
+  const [employeeSnapshots, branchSnapshots] = await Promise.all([
+    employeeIds.length ? db.getAll(...employeeIds.map((id) => db.doc(`employees/${id}`))) : [],
+    branchIds.length ? db.getAll(...branchIds.map((id) => db.doc(`branches/${id}`))) : [],
+  ]);
+  const employees = new Map(employeeSnapshots.filter((item) => item.exists).map((item) => [item.id, item.data() as EmployeeDocument]));
+  const branches = new Map(branchSnapshots.filter((item) => item.exists).map((item) => [item.id, item.data() as BranchDocument]));
+  return { requests: selected.map(({ id, data }) => publicLeaveRequest(id, data, employees.get(data.userId), branches.get(data.branchId))) };
+});
+
+export const reviewLeaveRequest = onCall<ReviewLeaveRequestInput>(callableOptions, async (request) => {
+  const actorId = requireUserId(request);
+  const context = await loadManagerContext(actorId);
+  await enforceRateLimit(actorId, "reviewLeaveRequest", 30, 300);
+  const requestId = requireDocumentId(request.data?.requestId, "Mã yêu cầu");
+  const decision = request.data?.decision;
+  if (decision !== "APPROVED" && decision !== "REJECTED") throw new HttpsError("invalid-argument", "Quyết định duyệt không hợp lệ.");
+  const reviewNote = typeof request.data?.reviewNote === "string" ? request.data.reviewNote.trim().slice(0, 500) : "";
+  const db = getFirestore();
+  const reference = db.doc(`leaveRequests/${requestId}`);
+  const now = Timestamp.now();
+  const updated = await db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(reference);
+    if (!snapshot.exists) throw new HttpsError("not-found", "Không tìm thấy yêu cầu nghỉ phép.");
+    const data = snapshot.data() as LeaveRequestDocument;
+    if (data.companyId !== context.employee.companyId) throw new HttpsError("permission-denied", "Yêu cầu không thuộc doanh nghiệp.");
+    await assertBranchAccess(context, data.branchId);
+    if (data.status !== "PENDING") throw new HttpsError("failed-precondition", "Yêu cầu đã được xử lý trước đó.");
+    const next: LeaveRequestDocument = { ...data, status: decision, reviewedAt: now, reviewedBy: actorId, reviewNote: reviewNote || null };
+    transaction.update(reference, { status: decision, reviewedAt: now, reviewedBy: actorId, reviewNote: reviewNote || null });
+    transaction.create(db.collection("auditLogs").doc(), buildAuditLogDocument(request, context, {
+      action: decision === "APPROVED" ? "LEAVE_APPROVED" : "LEAVE_REJECTED",
+      targetType: "LEAVE_REQUEST",
+      targetId: requestId,
+      metadata: { userId: data.userId, branchId: data.branchId, leaveType: data.leaveType },
+    }));
+    return next;
+  });
+  const employeeSnapshot = await db.doc(`employees/${updated.userId}`).get();
+  const branchSnapshot = await db.doc(`branches/${updated.branchId}`).get();
+  return { request: publicLeaveRequest(requestId, updated, employeeSnapshot.exists ? employeeSnapshot.data() as EmployeeDocument : undefined, branchSnapshot.exists ? branchSnapshot.data() as BranchDocument : undefined) };
+});
+
+export const exportPayrollCsv = onCall<PayrollExportInput>(callableOptions, async (request) => {
+  const actorId = requireUserId(request);
+  const context = await loadManagerContext(actorId);
+  assertWorkforceAccess(context.employee.role);
+  await enforceRateLimit(actorId, "exportPayrollCsv", 10, 300);
+  if (!isIsoDateOnly(request.data?.startDate) || !isIsoDateOnly(request.data?.endDate)) throw new HttpsError("invalid-argument", "Khoảng ngày payroll không hợp lệ.");
+  const branchId = sanitizeOptionalBranchId(request.data?.branchId);
+  const reportBranch = branchId ? await assertBranchAccess(context, branchId) : null;
+  const companySnapshot = reportBranch ? null : await getFirestore().doc(`companies/${context.employee.companyId}`).get();
+  const timezone = reportBranch?.timezone || (typeof companySnapshot?.data()?.timezone === "string" ? String(companySnapshot.data()?.timezone) : "Asia/Ho_Chi_Minh");
+  let start: Timestamp;
+  let end: Timestamp;
+  try {
+    start = Timestamp.fromDate(zonedDateBoundaryUtc(request.data.startDate, timezone));
+    end = Timestamp.fromDate(zonedDateBoundaryUtc(request.data.endDate, timezone, true));
+  } catch {
+    throw new HttpsError("failed-precondition", "Múi giờ payroll không hợp lệ.");
+  }
+  if (end.toMillis() < start.toMillis() || end.toMillis() - start.toMillis() > 31 * 24 * 60 * 60 * 1000) throw new HttpsError("invalid-argument", "Payroll chỉ hỗ trợ tối đa 31 ngày.");
+  const scopedBranchIds = TENANT_WIDE_REPORT_ROLES.includes(context.employee.role) ? null : context.employee.branchIds ?? [];
+  const queryBranchIds = branchId ? [branchId] : scopedBranchIds;
+  const db = getFirestore();
+  const makeQuery = (scopeBranchId: string | null) => {
+    let query = db.collection("attendanceEvents").where("companyId", "==", context.employee.companyId).where("serverTimestamp", ">=", start).where("serverTimestamp", "<=", end);
+    if (scopeBranchId) query = query.where("branchId", "==", scopeBranchId);
+    return query.orderBy("serverTimestamp", "asc").limit(5001).get();
+  };
+  const snapshots = queryBranchIds ? await Promise.all(queryBranchIds.slice(0, 20).map((id) => makeQuery(id))) : [await makeQuery(null)];
+  const events = snapshots.flatMap((snapshot) => snapshot.docs).sort((left, right) => Number(left.data().serverTimestamp?.toMillis?.() ?? 0) - Number(right.data().serverTimestamp?.toMillis?.() ?? 0));
+  const truncated = events.length > 5000;
+  const selectedEvents = events.slice(0, 5000);
+  const employeeIds = [...new Set(selectedEvents.map((event) => String(event.data().userId ?? "")).filter(Boolean))];
+  const branchIds = [...new Set(selectedEvents.map((event) => String(event.data().branchId ?? "")).filter(Boolean))];
+  const [employeeSnapshots, branchSnapshots, adjustmentSnapshots] = await Promise.all([
+    employeeIds.length ? db.getAll(...employeeIds.map((id) => db.doc(`employees/${id}`))) : [],
+    branchIds.length ? db.getAll(...branchIds.map((id) => db.doc(`branches/${id}`))) : [],
+    db.collection("attendanceAdjustments").where("companyId", "==", context.employee.companyId).limit(5000).get(),
+  ]);
+  const employees = new Map(employeeSnapshots.filter((item) => item.exists).map((item) => [item.id, item.data() as EmployeeDocument]));
+  const branches = new Map(branchSnapshots.filter((item) => item.exists).map((item) => [item.id, item.data() as BranchDocument]));
+  const adjustments = new Map(adjustmentSnapshots.docs.map((item) => [String(item.data().eventId), item.data()]));
+  const escape = (value: unknown) => {
+    const raw = String(value ?? "");
+    const safe = /^[\t\r ]*[=+\-@]/.test(raw) ? `'${raw}` : raw;
+    return `"${safe.replaceAll('"', '""')}"`;
+  };
+  const header = ["event_id", "employee_code", "employee_name", "branch", "type", "status", "original_timestamp", "effective_timestamp", "correction_request", "risk_score", "face_verified", "presence_verified", "device_verified", "distance_m", "gps_accuracy_m"];
+  const rows = selectedEvents.map((snapshot) => {
+    const event = snapshot.data();
+    const employee = employees.get(String(event.userId));
+    const branch = branches.get(String(event.branchId));
+    const adjustment = adjustments.get(snapshot.id);
+    const originalTimestamp = timestampToIso(event.serverTimestamp) ?? "";
+    const effectiveTimestamp = adjustment?.effectiveTimestamp instanceof Timestamp ? adjustment.effectiveTimestamp.toDate().toISOString() : originalTimestamp;
+    return [snapshot.id, employee?.employeeCode ?? "", employee?.fullName ?? "Nhân viên", branch?.name ?? "Chi nhánh", event.type, event.status, originalTimestamp, effectiveTimestamp, adjustment ? "APPROVED" : "", Number.isFinite(event.riskScore) ? event.riskScore : 0, event.faceVerified === true ? "YES" : "NO", event.presenceVerified === true ? "YES" : "NO", event.deviceVerified === true ? "YES" : "NO", Number.isFinite(event.distanceToBranchMeters) ? Math.round(event.distanceToBranchMeters) : "", Number.isFinite(event.locationAccuracy) ? Math.round(event.locationAccuracy) : ""];
+  });
+  const csv = `\uFEFF${[header, ...rows].map((row) => row.map(escape).join(",")).join("\r\n")}`;
+  await writeAuditLog(request, context, { action: "PAYROLL_CSV_EXPORTED", targetType: "PAYROLL_PERIOD", targetId: `${request.data.startDate}:${request.data.endDate}`, metadata: { branchId: branchId ?? "ALL", rowCount: rows.length, truncated } });
+  return { filename: `fastdo-payroll-${request.data.startDate}-${request.data.endDate}.csv`, csv, rowCount: rows.length, truncated, timezone };
 });
 
 export const getRealtimeMonitor = onCall<RealtimeMonitorInput>(callableOptions, async (request) => {

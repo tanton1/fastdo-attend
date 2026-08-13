@@ -12,13 +12,13 @@ PWA chấm công nhân viên theo phong cách **Black Ignite**, kết hợp Fire
 - Region dữ liệu và Functions: `asia-southeast1`
 - Firebase Authentication: Email/Password đã bật
 - Firestore: database `(default)` đã tạo, rules và indexes đã triển khai
-- Cloud Functions thế hệ 2: 24 callable API chấm công, hồ sơ, thiết bị, Face AI, quản trị nhân sự, Presence QR, pilot policy, báo cáo và realtime monitor chạy Node.js 22 sau Phase 8
+- Cloud Functions thế hệ 2: callable API chấm công, hồ sơ, thiết bị, Face AI, quản trị nhân sự, Presence QR, pilot policy, báo cáo/realtime, yêu cầu điều chỉnh công, nghỉ phép và payroll CSV chạy Node.js 22
 - Firebase App Check: reCAPTCHA Enterprise đã bật enforcement cho toàn bộ callable Functions production
 - Thiết bị mới phải được quản trị viên duyệt trước khi GPS/check-in được thực hiện
-- Quản trị viên có bảng điều khiển trong PWA để lọc, duyệt, khóa và mở khóa thiết bị
+- Quản trị viên có bảng điều khiển trong PWA để lọc, duyệt, khóa và mở khóa thiết bị; xử lý yêu cầu điều chỉnh công/nghỉ phép và xuất payroll CSV
 - Quản trị viên có thể tạo/cập nhật nhân viên, cấp mật khẩu tạm một lần, phân ca và reset Face enrollment trong đúng phạm vi công ty; tài khoản mới bị chặn khỏi nghiệp vụ cho tới khi đổi mật khẩu thành công
 - Chính sách pilot theo chi nhánh hỗ trợ `OFF`, `MONITOR`, `REQUIRED`, cửa sổ thời gian và cohort ổn định; chỉ `SUPER_ADMIN`/`COMPANY_ADMIN` được sửa policy
-- Báo cáo và realtime monitor trả dữ liệu có giới hạn cùng `truncated/hasMore`; attendance report hỗ trợ cursor opaque để tải tiếp các trang và chỉ mở CSV sau khi tải đủ kỳ
+- Báo cáo và realtime monitor trả dữ liệu có giới hạn cùng `truncated/hasMore`; attendance report hỗ trợ cursor opaque để tải tiếp các trang và chỉ mở CSV sau khi tải đủ kỳ. Payroll CSV dùng sự kiện và adjustment đã duyệt
 - QR hiện diện được ký bằng khóa trong Secret Manager, hết hạn sau 45 giây; proof của nhân viên chỉ dùng một lần
 - Face embedding được tạo trong trình duyệt; raw image/video không được upload. Template được mã hóa AES-256-GCM bằng khóa Secret Manager; Face proof và Presence proof đều do server phát, chỉ dùng một lần và được tiêu thụ nguyên tử cùng check-in
 - Face profile mới dùng `retentionExpiresAt` với Firestore TTL và kiểm tra hết hạn ở runtime. Profile Phase 7/policy bị rút ngắn cần chạy one-off backfill; dự án không dùng lifecycle trigger riêng nên trạng thái nhân viên có thể được sửa ở lần precheck/Face tiếp theo
@@ -99,10 +99,12 @@ Công cụ chỉ đọc metadata cần cho retention, không đọc descriptor; 
 - [Presence QR động](docs/phase-6-presence-qr.md)
 - [Face AI và quản trị nhân sự](docs/phase-7-face-workforce.md)
 - [Pilot hardening, báo cáo và realtime monitor](docs/phase-8-pilot-hardening.md)
+- [Runbook vận hành và go-live](docs/operations-runbook.md)
 - [Lịch sử thay đổi](CHANGELOG.md)
 
 ## Lưu ý về Face ID và Wi-Fi
 
 - PWA không truy cập dữ liệu sinh trắc Face ID của Apple. Passkey/WebAuthn và Face AI camera là hai lớp riêng.
+- PWA có service worker cho offline shell/cache giao diện; thao tác chấm công vẫn cần server xác nhận, không hiển thị thành công giả khi mất mạng.
 - Face AI chỉ gửi embedding, nhưng embedding vẫn là dữ liệu sinh trắc nhạy cảm và phải tuân theo consent, quyền rút đồng ý/reset/xóa, giới hạn truy cập và retention policy trong tài liệu Phase 7–8.
 - Trình duyệt không cho PWA đọc SSID/BSSID Wi-Fi. Dữ liệu `allowedWifiSsids` chỉ là cấu hình quản trị; bằng chứng hiện diện thật phải đến từ Presence Gateway trong mạng nội bộ, QR động có chữ ký, hoặc native wrapper/MDM.

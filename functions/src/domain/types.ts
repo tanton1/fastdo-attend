@@ -161,3 +161,37 @@ export interface PilotPolicyDocument {
   updatedAt: Timestamp | null;
   updatedBy: string | null;
 }
+
+export type AttendanceRequestStatus = "PENDING" | "APPROVED" | "REJECTED" | "CANCELLED";
+
+export interface AttendanceRequestDocument {
+  companyId: string;
+  userId: string;
+  branchId: string;
+  eventId: string;
+  requestedTimestamp: Timestamp;
+  reason: string;
+  status: AttendanceRequestStatus;
+  createdAt: Timestamp;
+  reviewedAt: Timestamp | null;
+  reviewedBy: string | null;
+  reviewNote: string | null;
+}
+
+export type LeaveRequestStatus = "PENDING" | "APPROVED" | "REJECTED" | "CANCELLED";
+export type LeaveType = "ANNUAL" | "SICK" | "UNPAID" | "OTHER";
+
+export interface LeaveRequestDocument {
+  companyId: string;
+  userId: string;
+  branchId: string;
+  startDate: string;
+  endDate: string;
+  leaveType: LeaveType;
+  reason: string;
+  status: LeaveRequestStatus;
+  createdAt: Timestamp;
+  reviewedAt: Timestamp | null;
+  reviewedBy: string | null;
+  reviewNote: string | null;
+}
