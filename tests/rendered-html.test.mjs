@@ -22,5 +22,7 @@ test("renders the FASTDO ATTEND prototype", async () => {
   assert.match(html, /<title>FASTDO ATTEND[^<]*Pilot Control[^<]*Realtime<\/title>/i);
   assert.match(html, /<meta[^>]*\bname="description"[^>]*\bcontent="[^"]*chấm công[^"]*"/i);
   assert.match(html, /\/og-phase8\.png/);
+  assert.match(html, /https:\/\/fastdo-attend\.vercel\.app\/og-phase8\.png/);
+  assert.doesNotMatch(html, /localhost:3000\/og-phase8\.png/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
 });

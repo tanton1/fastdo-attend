@@ -1,8 +1,11 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
+const productionSiteUrl = process.env.SITE_URL
+  ?? (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : "https://fastdo-attend.vercel.app");
+
 export const metadata: Metadata = {
-  metadataBase: new URL(process.env.SITE_URL ?? "http://localhost:3000"),
+  metadataBase: new URL(productionSiteUrl),
   title: "FASTDO ATTEND — Pilot Control & Realtime",
   description: "PWA chấm công đa lớp với Face AI, chính sách pilot theo chi nhánh, báo cáo và giám sát realtime.",
   applicationName: "FASTDO ATTEND",
