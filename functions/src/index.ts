@@ -68,6 +68,7 @@ import { publicDeviceStatus, readOwnedDevice, registerOrTouchDevice, requireDevi
 import type { DeviceRegistrationInput } from "./services/devices";
 import { defaultPilotPolicy, loadPilotPolicy, pilotPolicyDocumentId, pilotPolicyFromData, publicPilotPolicy } from "./services/pilot-policy";
 import { enforceRateLimit } from "./services/rate-limit";
+import { logOperationalError, logOperationalEvent } from "./services/observability";
 
 initializeApp();
 setGlobalOptions({ region: "asia-southeast1", maxInstances: 10, memory: "256MiB", timeoutSeconds: 30 });
@@ -881,6 +882,7 @@ export const createAttendanceRequest = onCall<CreateAttendanceRequestInput>(call
     }));
   });
   const branchSnapshot = await db.doc(`branches/${branchId}`).get();
+  logOperationalEvent({ event: "ATTENDANCE_CORRECTION_REQUESTED", functionName: "createAttendanceRequest", companyId: context.employee.companyId, branchId, status: data.status });
   return { request: publicAttendanceRequest(reference.id, data, context.employee, branchSnapshot.exists ? branchSnapshot.data() as BranchDocument : undefined) };
 });
 
@@ -984,6 +986,7 @@ export const reviewAttendanceRequest = onCall<ReviewAttendanceRequestInput>(call
   });
   const employeeSnapshot = await db.doc(`employees/${updated.userId}`).get();
   const branchSnapshot = await db.doc(`branches/${updated.branchId}`).get();
+  logOperationalEvent({ event: "ATTENDANCE_CORRECTION_REVIEWED", functionName: "reviewAttendanceRequest", companyId: context.employee.companyId, branchId: updated.branchId, status: updated.status });
   return { request: publicAttendanceRequest(requestId, updated, employeeSnapshot.exists ? employeeSnapshot.data() as EmployeeDocument : undefined, branchSnapshot.exists ? branchSnapshot.data() as BranchDocument : undefined) };
 });
 
@@ -1029,6 +1032,7 @@ export const createLeaveRequest = onCall<CreateLeaveRequestInput>(callableOption
     }));
   });
   const branchSnapshot = await db.doc(`branches/${branchId}`).get();
+  logOperationalEvent({ event: "LEAVE_REQUESTED", functionName: "createLeaveRequest", companyId: context.employee.companyId, branchId, status: data.status, metadata: { leaveType, startDate: dates.startDate, endDate: dates.endDate } });
   return { request: publicLeaveRequest(reference.id, data, context.employee, branchSnapshot.exists ? branchSnapshot.data() as BranchDocument : undefined) };
 });
 
@@ -1093,6 +1097,7 @@ export const reviewLeaveRequest = onCall<ReviewLeaveRequestInput>(callableOption
   });
   const employeeSnapshot = await db.doc(`employees/${updated.userId}`).get();
   const branchSnapshot = await db.doc(`branches/${updated.branchId}`).get();
+  logOperationalEvent({ event: "LEAVE_REVIEWED", functionName: "reviewLeaveRequest", companyId: context.employee.companyId, branchId: updated.branchId, status: updated.status });
   return { request: publicLeaveRequest(requestId, updated, employeeSnapshot.exists ? employeeSnapshot.data() as EmployeeDocument : undefined, branchSnapshot.exists ? branchSnapshot.data() as BranchDocument : undefined) };
 });
 
@@ -1154,6 +1159,7 @@ export const exportPayrollCsv = onCall<PayrollExportInput>(callableOptions, asyn
   });
   const csv = `\uFEFF${[header, ...rows].map((row) => row.map(escape).join(",")).join("\r\n")}`;
   await writeAuditLog(request, context, { action: "PAYROLL_CSV_EXPORTED", targetType: "PAYROLL_PERIOD", targetId: `${request.data.startDate}:${request.data.endDate}`, metadata: { branchId: branchId ?? "ALL", rowCount: rows.length, truncated } });
+  logOperationalEvent({ event: "PAYROLL_CSV_EXPORTED", functionName: "exportPayrollCsv", companyId: context.employee.companyId, branchId: branchId ?? undefined, rowCount: rows.length, truncated });
   return { filename: `fastdo-payroll-${request.data.startDate}-${request.data.endDate}.csv`, csv, rowCount: rows.length, truncated, timezone };
 });
 
@@ -2110,6 +2116,7 @@ export const getPrecheck = onCall<PrecheckInput>(callableOptions, async (request
 
 export const checkIn = onCall<AttendanceInput>(callableOptions, async (request) => {
   const userId = requireUserId(request);
+  const startedAt = Date.now();
   requireAttendanceInput(request.data);
 
   const context = await loadAttendanceContext(userId);
@@ -2297,13 +2304,20 @@ export const checkIn = onCall<AttendanceInput>(callableOptions, async (request) 
       metadata: { decision: risk.decision, status: attendanceStatus },
     }));
     return response;
+  }).catch((error: unknown) => {
+    const errorCode = typeof error === "object" && error && "code" in error ? String(error.code) : "unknown";
+    logOperationalError({ event: "CHECK_IN_FAILED", functionName: "checkIn", companyId: context.employee.companyId, branchId: context.branchId, durationMs: Date.now() - startedAt, errorCode });
+    throw error;
   });
+
+  logOperationalEvent({ event: "CHECK_IN_DECIDED", functionName: "checkIn", companyId: context.employee.companyId, branchId: context.branchId, status: result.status, riskScore: result.risk.score, durationMs: Date.now() - startedAt });
 
   return result;
 });
 
 export const checkOut = onCall<AttendanceInput>(callableOptions, async (request) => {
   const userId = requireUserId(request);
+  const startedAt = Date.now();
   requireAttendanceInput(request.data);
 
   const context = await loadAttendanceContext(userId);
@@ -2362,7 +2376,13 @@ export const checkOut = onCall<AttendanceInput>(callableOptions, async (request)
       metadata: { status: response.status },
     }));
     return response;
+  }).catch((error: unknown) => {
+    const errorCode = typeof error === "object" && error && "code" in error ? String(error.code) : "unknown";
+    logOperationalError({ event: "CHECK_OUT_FAILED", functionName: "checkOut", companyId: context.employee.companyId, branchId: context.branchId, durationMs: Date.now() - startedAt, errorCode });
+    throw error;
   });
+
+  logOperationalEvent({ event: "CHECK_OUT_RECORDED", functionName: "checkOut", companyId: context.employee.companyId, branchId: context.branchId, status: result.status, durationMs: Date.now() - startedAt });
 
   return result;
 });

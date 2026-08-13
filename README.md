@@ -100,6 +100,7 @@ Công cụ chỉ đọc metadata cần cho retention, không đọc descriptor; 
 - [Face AI và quản trị nhân sự](docs/phase-7-face-workforce.md)
 - [Pilot hardening, báo cáo và realtime monitor](docs/phase-8-pilot-hardening.md)
 - [Runbook vận hành và go-live](docs/operations-runbook.md)
+- [Production monitoring và cảnh báo](docs/production-monitoring.md)
 - [Lịch sử thay đổi](CHANGELOG.md)
 
 ## Lưu ý về Face ID và Wi-Fi

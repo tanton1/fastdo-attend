@@ -44,6 +44,7 @@
 
 - [ ] Firebase Rules/indexes và 30 callable Functions đã deploy ở `asia-southeast1`.
 - [ ] App Check enforcement, Secret Manager keys, billing alert và quota alert hoạt động.
+- [ ] Structured Cloud Logging events và cảnh báo theo [production-monitoring.md](production-monitoring.md) đã được kiểm tra.
 - [ ] Emulator integration test cho Auth/App Check/Rules/tenant isolation/concurrency đạt.
 - [ ] Kiểm thử ít nhất hai iPhone và hai Android với browser thường và PWA standalone.
 - [ ] Face retention backfill dry-run/apply đã được phê duyệt; TTL được xác minh.

@@ -8,6 +8,7 @@
 - Thêm payroll CSV theo kỳ/chi nhánh, chống CSV formula injection và chặn kỳ vượt 5.000 sự kiện.
 - Thêm service worker offline shell; thao tác chấm công vẫn cần server xác nhận.
 - Mở rộng Firestore Rules/indexes và runbook go-live.
+- Thêm structured operational logs cho check-in/out, workflow request, payroll và rate-limit; bổ sung tài liệu Cloud Logging/alert.
 
 ## Phase 9 — Report pagination (2026-08-13)
 
